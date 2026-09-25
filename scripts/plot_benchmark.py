@@ -26,12 +26,12 @@ for w, t in zip(workers, throughput):
 ax.set_xlabel("Detector workers (classifiers ≈ 1 per 3 detectors)")
 ax.set_ylabel("Throughput (images/sec)")
 ax.set_title(
-    f"Fake model (fixed 300 ms/task): orchestration scaling, {rows[0]['images']} images"
+    f"Orchestration scaling, fake 300 ms model ({rows[0]['images']} images)"
     if FAKE
     else f"ForgeGrid throughput vs workers ({rows[0]['images']} images, CPU)"
 )
 ax.set_xticks(workers)
-ax.set_ylim(bottom=0)
+ax.set_ylim(0, max(throughput + [base * workers[-1]]) * 1.15)
 ax.grid(alpha=0.25)
 ax.spines[["top", "right"]].set_visible(False)
 ax.legend(frameon=False)
