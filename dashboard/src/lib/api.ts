@@ -1,4 +1,4 @@
-import type { Benchmarks, Chaos, Config, GalleryImage, JobSummary, SystemSnapshot, TaskEvent, Worker } from './types';
+import type { Benchmarks, Chaos, Cluster, Config, GalleryImage, JobSummary, SystemSnapshot, TaskEvent, Worker } from './types';
 
 // Every call goes through the same-origin /api prefix (nginx in prod, Vite proxy in dev).
 export class ApiError extends Error {
@@ -31,6 +31,8 @@ export const api = {
   getSystem: () => request<SystemSnapshot>('/system'),
   /** v2: benchmarks/summary.json. 404 until the benchmark harness has run. */
   getBenchmarks: () => request<Benchmarks>('/benchmarks'),
+  /** HA: who leads, and which replicas are alive. 404 on a single-coordinator build. */
+  getCluster: () => request<Cluster>('/cluster'),
   getChaos: () => request<Chaos>('/chaos'),
   setChaos: (chaos: Chaos) => postJson<Chaos>('/chaos', chaos),
   getMetrics: () => request<{ throttled?: boolean; queues?: { detect?: number; classify?: number } }>('/metrics'),

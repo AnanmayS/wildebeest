@@ -8,15 +8,19 @@ import { Pipeline } from './components/pipeline/Pipeline';
 import { Benchmarks } from './components/fast/Benchmarks';
 import { TaskWaterfall } from './components/fast/TaskWaterfall';
 import { ThroughputSpark } from './components/fast/ThroughputSpark';
+import { StragglerStrip } from './components/fast/StragglerStrip';
+import { FailoverStrip } from './components/robust/FailoverStrip';
 import { FencingPanel } from './components/robust/FencingPanel';
 import { Invariants } from './components/robust/Invariants';
 import { RecoveryTimeline } from './components/robust/RecoveryTimeline';
 import { useBenchmarks } from './hooks/useBenchmarks';
 import { useNow } from './hooks/useNow';
 import { useThroughputSeries } from './hooks/useThroughputSeries';
+import { useLeaseSightings } from './hooks/useLeaseSightings';
 import { useWildebeest } from './hooks/useWildebeest';
 import { pipelineModel } from './lib/pipeline';
 import { latestRecovery } from './lib/recovery';
+import { latestFailover, useHaView } from './lib/ha';
 
 /**
  * Above the fold at 1440×900: how work flows (hero), why it's fast, why it's robust.
@@ -33,9 +37,15 @@ export default function App() {
   });
   const series = useThroughputSeries(system, job);
   const imagesPerSec = series.length ? series.slice(-5).reduce((s, p) => s + p.images, 0) / Math.min(5, series.length) : null;
-  const recovery = latestRecovery(system, live.events);
+  const sightings = useLeaseSightings(system);
+  const recovery = latestRecovery(system, live.events, sightings);
   const hasBenchParts = !!(benchmarks?.ceiling?.series.length || benchmarks?.recovery || benchmarks?.overhead);
   const hasTimings = !!system?.timings && system.timings.samples > 0;
+  const ha = useHaView(live.cluster, system, now);
+  const failover = latestFailover(live.events);
+  const speculation = system?.speculation?.enabled !== false ? system?.speculation : undefined;
+  // Build-time VITE_GRAFANA_URL, or a `grafanaUrl` in GET /config should the coordinator ever serve one.
+  const grafanaUrl = live.config.grafanaUrl || import.meta.env.VITE_GRAFANA_URL || null;
 
   return (
     <div className="mx-auto max-w-[1680px] px-5 pb-10 pt-2">
@@ -47,14 +57,16 @@ export default function App() {
         onStartSample={live.startSample}
         onUploaded={live.focusJob}
         onError={(msg) => live.logLocal('failed', msg)}
+        grafanaUrl={grafanaUrl}
       />
 
       <main className="mt-1.5 flex flex-col gap-2.5">
-        <Pipeline live={live} pipeline={pipeline} imagesPerSec={imagesPerSec} series={series} now={now} />
+        <Pipeline live={live} pipeline={pipeline} ha={ha} imagesPerSec={imagesPerSec} series={series} now={now} />
 
         <div className="grid grid-cols-1 gap-x-3 gap-y-2.5 xl:grid-cols-2">
           <Group title="Why it's fast" tone="text-leaf-400">
             {hasTimings && <TaskWaterfall timings={system!.timings!} />}
+            {speculation && <StragglerStrip speculation={speculation} events={live.events} />}
             {benchmarks && hasBenchParts && <Benchmarks data={benchmarks} />}
             {/* The live trend also sits in the result store; it gets its own panel only when there's room. */}
             {!(hasTimings && hasBenchParts) && <ThroughputSpark series={series} />}
@@ -62,6 +74,7 @@ export default function App() {
 
           <Group title="Why it's robust" tone="text-violet-300">
             <RecoveryTimeline recovery={recovery} workerTimeoutMs={pipeline.limits.workerTimeoutMs} dockerEvents={pipeline.v2} now={now} />
+            <FailoverStrip failover={failover} silent={ha?.leaderSilent ?? null} now={now} />
             <div className={`grid gap-2.5 ${system?.invariants || benchmarks?.faults ? 'grid-cols-[1fr_236px]' : 'grid-cols-1'}`}>
               <FencingPanel fencing={system?.fencing} leases={system?.leases} events={live.events} leaseMs={pipeline.limits.leaseMs} now={now} />
               <Invariants invariants={system?.invariants} faults={benchmarks?.faults} now={now} />

@@ -1,5 +1,7 @@
 import type { Live } from '../../hooks/useWildebeest';
 import type { PipelineModel } from '../../lib/pipeline';
+import type { HaView } from '../../lib/ha';
+import { Coordinators } from './Coordinators';
 import type { ThroughputPoint } from '../../hooks/useThroughputSeries';
 import { fmtPct } from '../../lib/format';
 import { Badge } from '../ui/Badge';
@@ -10,6 +12,7 @@ import { Wire } from './Wire';
 interface Props {
   live: Live;
   pipeline: PipelineModel;
+  ha: HaView | null;
   imagesPerSec: number | null;
   series: ThroughputPoint[];
   now: number;
@@ -22,7 +25,7 @@ const COLUMNS = '112px 16px 140px 44px 64px minmax(0,1.3fr) 64px minmax(0,1fr) 1
  * The hero: the actual topology, left to right, with live state in every box. Packets on the
  * worker lanes are real lease changes (claims, completions, requeues), not decoration.
  */
-export function Pipeline({ live, pipeline, imagesPerSec, series, now }: Props) {
+export function Pipeline({ live, pipeline, ha, imagesPerSec, series, now }: Props) {
   const { job, system } = live;
   const { queues, limits } = pipeline;
   const c = job?.categories;
@@ -36,14 +39,14 @@ export function Pipeline({ live, pipeline, imagesPerSec, series, now }: Props) {
     <section className="card px-5 pb-2 pt-2.5">
       <header className="flex items-baseline justify-between gap-4">
         <div className="flex min-w-0 items-baseline gap-3">
-          <h2 className="text-[17px] font-semibold tracking-tight">How work flows</h2>
+          <h2 className="shrink-0 whitespace-nowrap text-[17px] font-semibold tracking-tight">How work flows</h2>
           <p className="caption truncate">
             Each photo is a task: the dispatcher pushes it to Redis, a worker leases it with a fencing epoch, and the result is written once. Dots are real claims and completions.
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-2">
+          {ha && ha.nodes.length > 0 && <Coordinators ha={ha} />}
           {pipeline.claimMode && <Badge title="CLAIM_MODE: hybrid = Redis ready queue + Postgres lease; postgres = SKIP LOCKED claim">claim: {pipeline.claimMode}</Badge>}
-          {system?.leader && <Badge tone="leaf" title={`leader since ${system.leader.since}`}>leader {system.leader.id} · term {system.leader.term}</Badge>}
           {!pipeline.v2 && <Badge tone="sun" title="The coordinator has no GET /system: showing what v1 endpoints provide">v1 coordinator</Badge>}
         </div>
       </header>

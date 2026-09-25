@@ -60,12 +60,22 @@ export interface Worker {
   // v2: native (non-container) workers can't be killed or paused through Docker.
   runtime?: 'container' | 'native';
   device?: 'cpu' | 'mps' | 'cuda';
+  hostname?: string | null;
+  killedAt?: string | null;
+  // P3 (speculation), additive: copies this worker runs (not in currentTaskIds), and whether it is
+  // too slow to be given copies (p50 > 3x its stage's p50).
+  speculativeTaskIds?: string[];
+  probation?: boolean;
+  /** Coordinator-measured p50 (claimed -> complete handled), last 20 tasks; null until 3 samples. */
+  p50ServiceMs?: number | null;
 }
 
 export type EventType =
   | 'worker_killed' | 'worker_died' | 'reassigned' | 'lease_expired' | 'stale_rejected' | 'cache_hit'
   | 'throttled' | 'unthrottled' | 'failed' | 'job_done'
-  | 'worker_paused' | 'worker_resumed' | 'released' | 'speculated';
+  | 'worker_paused' | 'worker_resumed' | 'released' | 'redriven' | 'heartbeat_refused' | 'job_cancelled'
+  | 'speculated' | 'speculation_won' | 'speculation_wasted'
+  | 'leader_elected' | 'leader_lost' | 'leader_fenced';
 
 export interface TaskEvent {
   id: number;
@@ -85,6 +95,8 @@ export interface Config {
   workerTimeoutMs: number;
   leaseMs: number;
   humanReviewSecondsPerImage: number;
+  /** Not served by the coordinator yet; read if it ever is. VITE_GRAFANA_URL is the build-time fallback. */
+  grafanaUrl?: string | null;
 }
 
 export interface Chaos {
@@ -120,6 +132,8 @@ export interface Lease {
   ageMs: number;
   attempt: number;
   imageUrl?: string | null;
+  /** P3: the task's running speculative copy (copies are not separate lease items). */
+  copy?: { workerId: string; epoch: number; ageMs: number } | null;
 }
 
 export const TIMING_STEPS = ['dispatchWaitMs', 'queueWaitMs', 'claimMs', 'fetchMs', 'inferMs', 'uploadMs', 'completeMs'] as const;
@@ -128,7 +142,8 @@ export type TimingSet = Partial<Record<TimingStep | 'totalMs', number>>;
 
 export interface RecoveryRecord {
   workerId: string;
-  killedAt: string;
+  /** Null when the coordinator didn't cause the death (no kill/pause request to start the clock). */
+  killedAt: string | null;
   detectedAt: string;
   via: 'docker_event' | 'heartbeat' | string;
   requeuedAt: string | null;
@@ -155,8 +170,25 @@ export interface SystemSnapshot {
   invariants?: { checkedAt: string; duplicateResults: number; stuckLeases: number; lostImages: number; ok: boolean };
   throughput?: { t: string; detect: number; classify: number; images: number }[];
   cache?: { hitsLast10m: number; hitRatePct: number };
-  speculation?: { launched: number; won: number; wasted: number };
+  speculation?: Speculation;
   leader?: { id: string; term: number; since: string } | null;
+}
+
+/** P3: straggler speculation. launched/won/wasted are all-time counts of the three events. */
+export interface Speculation {
+  launched: number;
+  won: number;
+  wasted: number;
+  running?: number;
+  enabled?: boolean;
+  probation?: { workerId: string; stage: Stage; p50ServiceMs: number; stageP50ServiceMs: number }[];
+}
+
+/** GET /cluster (HA): the answering replica, the lease holder, and every live replica's row. */
+export interface Cluster {
+  self: { id: string; instance: string; role: 'leader' | 'follower'; term: number | null };
+  leader: { id: string; term: number; since: string; renewedAt: string; expiresAt: string; valid: boolean } | null;
+  nodes: { id: string; instance: string; role: 'leader' | 'follower'; term: number | null; startedAt: string; lastSeenAt: string }[];
 }
 
 // GET /benchmarks (benchmarks/summary.json)

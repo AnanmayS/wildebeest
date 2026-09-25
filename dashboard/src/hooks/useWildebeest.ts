@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../lib/api';
-import type { Chaos, Config, JobSummary, ServerMessage, SystemSnapshot, TaskEvent, Worker } from '../lib/types';
+import type { Chaos, Cluster, Config, JobSummary, ServerMessage, SystemSnapshot, TaskEvent, Worker } from '../lib/types';
 
 const POLL_MS = 2000;
 const MAX_EVENTS = 200;
@@ -36,9 +36,11 @@ export function useWildebeest() {
   const [killRequested, setKillRequested] = useState<Record<string, PendingAction>>({});
   const [pauseRequested, setPauseRequested] = useState<Record<string, PendingAction>>({});
   const [config, setConfig] = useState<Config>(DEFAULT_CONFIG);
+  const [cluster, setCluster] = useState<Cluster | null>(null);
 
   const wsLastSeen = useRef({ job: 0, workers: 0, throttle: 0, system: 0 });
   const systemMissingAt = useRef(0);
+  const clusterMissingAt = useRef(0);
   const localEventId = useRef(-1);
   const wsOpen = useRef(false);
 
@@ -166,9 +168,24 @@ export function useWildebeest() {
       }
     };
 
+    const pollCluster = async () => {
+      if (Date.now() - clusterMissingAt.current < SYSTEM_RETRY_MS) return;
+      try {
+        const c = await api.getCluster();
+        if (!cancelled) setCluster(c);
+      } catch (err) {
+        // 404: a single-coordinator build. Anything else (a replica mid-failover) keeps the last answer.
+        if (err instanceof ApiError && err.status === 404) {
+          clusterMissingAt.current = Date.now();
+          if (!cancelled) setCluster(null);
+        }
+      }
+    };
+
     const poll = async () => {
       if (!wsOpen.current) seedEvents(); // socket down: keep the event log fresh from REST
       pollSystem();
+      pollCluster();
       const [jobs, workersRes, metrics, chaosRes] = await Promise.allSettled([
         api.listJobs(), api.listWorkers(), api.getMetrics(), api.getChaos(),
       ]);
@@ -259,7 +276,7 @@ export function useWildebeest() {
   }, [logLocal]);
 
   return {
-    job, workers, events, system, throttle, queues, chaos, connection, killRequested, pauseRequested, config,
+    job, workers, events, system, cluster, throttle, queues, chaos, connection, killRequested, pauseRequested, config,
     startSample, focusJob, killWorker, pauseWorker, setChaos, logLocal,
   };
 }

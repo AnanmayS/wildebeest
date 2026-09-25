@@ -13,13 +13,17 @@ export interface WorkerStory {
   /** Frozen with `docker pause`: when it started and when it thaws. */
   pause?: { from: number; until: number; declaredDeadAt?: number };
   /** How the coordinator learned this worker died. */
-  death?: { at: number; via?: string; detectMs?: number };
+  death?: { at: number; via?: string; detectMs?: number; exitToDeadMs?: number };
   /** Its late result was fenced off: shown on the lane for a while after waking. */
   fenced?: { at: number; epoch?: number; currentEpoch?: number };
+  /** Woke up after being declared dead: its heartbeat got 410 and it re-registers. */
+  refused?: { at: number };
 }
 
 /** How long the fencing verdict stays on a lane after the stale result is rejected. */
 const VERDICT_MS = 15_000;
+/** The 410 is only the preamble: the stale result (if it had one in flight) follows within a second or two. */
+const REFUSED_MS = 6_000;
 const DEFAULT_PAUSE_MS = 20_000;
 
 export function workerStory(
@@ -51,7 +55,7 @@ export function workerStory(
 
   if (w.status === 'DEAD' || w.state === 'dead') {
     story.death = diedAt
-      ? { at: diedAt, via: (died?.detail?.via as string | undefined) ?? recovery?.via, detectMs: num(died, 'detectMs') }
+      ? { at: diedAt, via: (died?.detail?.via as string | undefined) ?? recovery?.via, detectMs: num(died, 'detectMs'), exitToDeadMs: num(died, 'exitToDeadMs') }
       : undefined;
   }
 
@@ -64,12 +68,14 @@ export function workerStory(
   const stale = latest('stale_rejected');
   if (stale && now - Date.parse(stale.at) < VERDICT_MS) {
     const parsed = epochsFromMessage(stale.message);
-    story.fenced = {
-      at: Date.parse(stale.at),
-      epoch: num(stale, 'leaseEpoch') ?? parsed.epoch,
-      currentEpoch: num(stale, 'currentEpoch') ?? parsed.currentEpoch,
-    };
+    const epoch = num(stale, 'leaseEpoch') ?? parsed.epoch;
+    const currentEpoch = num(stale, 'currentEpoch') ?? parsed.currentEpoch;
+    // Same epoch = a re-sent result that had already committed, not a zombie waking up: no verdict on the lane.
+    if (epoch == null || epoch !== currentEpoch) story.fenced = { at: Date.parse(stale.at), epoch, currentEpoch };
   }
+
+  const refused = latest('heartbeat_refused');
+  if (!story.fenced && refused && now - Date.parse(refused.at) < REFUSED_MS) story.refused = { at: Date.parse(refused.at) };
 
   if (w.status === 'STOPPED') story.phase = 'stopped';
   else if (w.status === 'DEAD' || w.state === 'dead') story.phase = 'dead';

@@ -40,7 +40,7 @@ export function WorkerLane({ worker: w, story, leaseOf, limits, now, canPause, o
   const dead = story.phase === 'dead';
 
   // Diff the worker's held task IDs between updates: every change is a real claim, completion or requeue.
-  const held = w.currentTaskIds;
+  const held = heldTasks(w);
   const prev = useRef(held);
   const heldKey = held.join(',');
   useEffect(() => {
@@ -79,6 +79,11 @@ export function WorkerLane({ worker: w, story, leaseOf, limits, now, canPause, o
             <>
               <Badge tone={w.device && w.device !== 'cpu' ? 'sky' : 'ink'}>{w.device ?? 'cpu'}</Badge>
               {story.native && <Badge tone="sky" title="Runs outside Docker, registered with the same coordinator">native</Badge>}
+              {w.probation && (
+                <Badge tone="sun" title={`On probation: p50 ${fmtMs(w.p50ServiceMs)} per task, more than 3× its stage's p50. It keeps its own work but is never given speculative copies, and its stragglers get copied elsewhere.`}>
+                  probation
+                </Badge>
+              )}
               <span className="flex-1" />
               <LaneButton label={`Pause ${w.id}`} tone="sun" disabled={!actionable || !canPause} title={why ?? (!canPause ? 'Needs a v2 coordinator (POST /workers/:id/pause)' : undefined) ?? 'docker pause for 20 s: longer than the heartbeat timeout, so its task is reclaimed and its late result gets fenced'} onClick={() => onPause(w.id)}>
                 Pause
@@ -110,11 +115,17 @@ function LaneDetail({ worker: w, story, leaseOf, limits, now, frozenTask }: Omit
       </span>
     );
   }
+  if (story.refused && story.phase !== 'dead') {
+    return <span className="truncate text-violet-300">woke after being declared dead · <b className="font-semibold">heartbeat refused (410)</b>, re-registering</span>;
+  }
   if (story.phase === 'killing') return <span className="truncate text-ember-300">SIGKILL sent · waiting for Docker's die event…</span>;
   if (story.phase === 'dead') {
     const d = story.death;
+    // Docker's own kill can take a few hundred ms on Docker Desktop; exit -> DEAD is the coordinator's part.
     const how = d?.via === 'docker_event'
-      ? <>Docker event in <b className="font-semibold">{fmtMs(d.detectMs)}</b></>
+      ? d.exitToDeadMs != null
+        ? <span title={`${fmtMs(d.detectMs)} from the kill request (Docker took ${fmtMs((d.detectMs ?? 0) - d.exitToDeadMs)} to stop the container)`}>Docker die event, caught <b className="font-semibold">{fmtMs(d.exitToDeadMs)}</b> after exit</span>
+        : <>Docker event in <b className="font-semibold">{fmtMs(d.detectMs)}</b></>
       : d?.via === 'heartbeat' ? <>heartbeat timeout</> : <>declared dead</>;
     return (
       <span className="truncate text-ember-300">
@@ -123,15 +134,21 @@ function LaneDetail({ worker: w, story, leaseOf, limits, now, frozenTask }: Omit
       </span>
     );
   }
+  // Copies first: a copy is the reason this worker is busy while the queue is empty.
+  const chips = [
+    ...(w.speculativeTaskIds ?? []).map((id) => ({ id, speculative: true })),
+    ...w.currentTaskIds.map((id) => ({ id, speculative: false })),
+  ].slice(0, 2);
+  const perTask = w.avgLatencyMs || w.p50ServiceMs || null; // 0 = no samples yet
   return (
     <>
-      {w.currentTaskIds.length ? (
-        w.currentTaskIds.slice(0, 2).map((id) => <LeaseChip key={id} taskId={id} lease={leaseOf(id)} leaseMs={limits.leaseMs} />)
+      {chips.length ? (
+        chips.map((c) => <LeaseChip key={`${c.id}/${c.speculative}`} taskId={c.id} lease={leaseOf(c.id)} leaseMs={limits.leaseMs} speculative={c.speculative} />)
       ) : (
         <span className="text-ink-500">idle</span>
       )}
-      <span className="ml-auto shrink-0 tabular text-ink-400">
-        {w.avgLatencyMs != null && <>{fmtMs(w.avgLatencyMs)}<span className="text-ink-500">/task · </span></>}
+      <span className={`ml-auto shrink-0 tabular ${w.probation ? 'text-sun-300' : 'text-ink-400'}`}>
+        {perTask != null && <>{fmtMs(perTask)}<span className="text-ink-500">/task · </span></>}
         {fmtInt(w.tasksCompleted)}
         <span className="text-ink-500"> done</span>
       </span>
@@ -163,6 +180,11 @@ function PauseTrack({ pause, now, limits, frozenTask }: { pause: NonNullable<Wor
 }
 
 interface FrozenTask { taskId: string; lease?: Lease }
+
+/** Every task the worker is running or holding: its leases plus any speculative copy. */
+function heldTasks(w: Worker): string[] {
+  return w.speculativeTaskIds?.length ? [...w.currentTaskIds, ...w.speculativeTaskIds] : w.currentTaskIds;
+}
 
 /** Remember what a worker was holding when it froze: the coordinator forgets it once it is declared dead. */
 function useFrozenTask(w: Worker, story: WorkerStory, leaseOf: Props['leaseOf']): FrozenTask | null {

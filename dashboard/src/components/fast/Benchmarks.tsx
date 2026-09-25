@@ -39,7 +39,7 @@ export function Benchmarks({ data }: { data: BenchmarksData }) {
 const TONE = ['stroke-leaf-400', 'stroke-ink-300', 'stroke-ink-500'];
 const DOT = ['fill-leaf-400', 'fill-ink-300', 'fill-ink-500'];
 const VW = 400;
-const VH = 92;
+const VH = 80;
 const PAD = { l: 30, r: 40, t: 6, b: 16 };
 
 /** Throughput vs workers on a log₂ x-axis: linear scaling is a straight climb, the bend is the ceiling. */

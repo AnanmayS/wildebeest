@@ -19,7 +19,14 @@ const STYLE: Record<string, { label: string; cls: string }> = {
   worker_paused: { label: 'Paused', cls: 'text-sun-300 bg-sun-400/12' },
   worker_resumed: { label: 'Resumed', cls: 'text-ink-300 bg-ink-800' },
   released: { label: 'Released', cls: 'text-ink-300 bg-ink-800' },
-  speculated: { label: 'Speculated', cls: 'text-sky-400 bg-sky-400/12' },
+  redriven: { label: 'Redriven', cls: 'text-sun-300 bg-sun-400/12' },
+  heartbeat_refused: { label: 'Heartbeat refused', cls: 'text-violet-400 bg-violet-400/12' },
+  speculated: { label: 'Copy launched', cls: 'text-sky-400 bg-sky-400/12' },
+  speculation_won: { label: 'Copy won', cls: 'text-sky-400 bg-sky-400/12' },
+  speculation_wasted: { label: 'Copy wasted', cls: 'text-ink-300 bg-ink-800' },
+  leader_elected: { label: 'Leader elected', cls: 'text-leaf-400 bg-leaf-400/12' },
+  leader_lost: { label: 'Leader lost', cls: 'text-ember-400 bg-ember-400/12' },
+  leader_fenced: { label: 'Leader fenced', cls: 'text-violet-400 bg-violet-400/12' },
 };
 
 export function EventLog({ events }: { events: TaskEvent[] }) {

@@ -73,14 +73,14 @@ function Timeline({ r, workerTimeoutMs }: { r: RecoveryView; workerTimeoutMs: nu
       <ol className="mt-3 flex items-start text-[12px]">
         <Step dot="bg-ember-400" title="Failure" sub={viaDocker ? 'SIGKILL, exit 137' : 'killed or frozen'} />
         <Gap ms={detect} tone="text-ember-300" />
-        <Step dot="bg-ember-400" title="Detected" sub={viaDocker ? 'Docker die event' : 'heartbeat timeout'} />
+        <Step dot="bg-ember-400" title="Detected" sub={viaDocker ? (r.exitToDeadMs != null ? `die event, ${fmtMs(r.exitToDeadMs)} after exit` : 'Docker die event') : 'heartbeat timeout'} />
         <Gap ms={requeue} tone="text-sun-300" />
-        <Step dot="bg-sun-400" title="Requeued" sub={r.tasks ? `${r.tasks} task${r.tasks > 1 ? 's' : ''} → queue head` : 'nothing in flight'} />
+        <Step dot="bg-sun-400" title="Requeued" sub={r.tasks ? `${r.tasks} task${r.tasks > 1 ? 's' : ''} → queue head` : r.promotedTo ? <>copy on <span className="font-mono">{shortId(r.promotedTo)}</span> took over</> : 'nothing in flight'} />
         <Gap ms={reclaim} tone="text-sun-300" />
         <Step
           dot={r.reclaimedAt ? 'bg-leaf-400' : 'bg-ink-600'}
           title="Reclaimed"
-          sub={r.reclaimedBy ? <>by <span className="font-mono">{shortId(r.reclaimedBy)}</span></> : r.reclaimedAt ? 'by a live worker' : r.source === 'events' ? 'not reported (v1)' : r.tasks ? 'waiting for a worker' : '—'}
+          sub={r.reclaimedBy ? <span title={r.observed ? 'Claim time read from the live lease table: the coordinator did not close this recovery record' : undefined}>by <span className="font-mono">{shortId(r.reclaimedBy)}</span></span> : r.reclaimedAt ? 'by a live worker' : r.source === 'events' ? 'not reported' : r.tasks ? 'waiting for a worker' : '—'}
         />
       </ol>
     </div>

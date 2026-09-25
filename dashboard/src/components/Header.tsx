@@ -17,10 +17,12 @@ interface Props {
   onStartSample: (size: number) => Promise<void>;
   onUploaded: (jobId: string) => Promise<void>;
   onError: (message: string) => void;
+  /** Grafana (traces + Prometheus), when the observability profile is part of this deployment. */
+  grafanaUrl?: string | null;
 }
 
 /** Title, the active job at a glance, and every demo control that isn't on a worker lane. */
-export function Header({ connection, job, chaos, onChaos, onStartSample, onUploaded, onError }: Props) {
+export function Header({ connection, job, chaos, onChaos, onStartSample, onUploaded, onError, grafanaUrl }: Props) {
   const [size, setSize] = useState(1000);
   const [starting, setStarting] = useState(false);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
@@ -62,7 +64,17 @@ export function Header({ connection, job, chaos, onChaos, onStartSample, onUploa
             <h1 className="text-[22px] font-semibold leading-none tracking-tight">Wildebeest</h1>
             <ConnectionPill connection={connection} />
           </div>
-          <p className="mt-1 text-[12.5px] leading-none text-ink-400">Fault-tolerant distributed camera-trap pipeline</p>
+          <p className="mt-1 text-[12.5px] leading-none text-ink-400">
+            Fault-tolerant distributed camera-trap pipeline
+            {grafanaUrl && (
+              <>
+                {' · '}
+                <a href={grafanaUrl} target="_blank" rel="noreferrer" className="text-ink-300 underline decoration-ink-600 underline-offset-2 hover:text-leaf-300" title="Per-image traces (Tempo) and Prometheus metrics">
+                  Open traces in Grafana ↗
+                </a>
+              </>
+            )}
+          </p>
         </div>
       </div>
 

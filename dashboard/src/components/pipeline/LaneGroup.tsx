@@ -71,7 +71,7 @@ function StageHeader({ title, model, stats }: { title: string; model: string; st
       <div className="shrink-0 text-[12px] tabular text-ink-400" title="tasks completed per second (last 10 s) · p50 service time (claim to complete)">
         <b className="text-[15px] font-semibold text-ink-100">{stats.completedPerSec != null ? fmtRate(stats.completedPerSec) : '—'}</b>
         <span className="text-ink-500">/s</span>
-        {stats.p50ServiceMs != null && <> · p50 {fmtMs(stats.p50ServiceMs)}</>}
+        {!!stats.p50ServiceMs && <> · p50 {fmtMs(stats.p50ServiceMs)}</>}
       </div>
     </div>
   );

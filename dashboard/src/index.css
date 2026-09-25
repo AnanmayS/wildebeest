@@ -7,7 +7,7 @@
  *   ember  = a worker died / was killed
  *   sun    = recovery and pressure (requeued, frozen, throttled)
  *   violet = fencing (epochs, stale results rejected)
- *   sky    = cache and non-CPU devices
+ *   sky    = shortcuts: cache hits, non-CPU devices, speculative copies
  * Everything else is ink.
  */
 @theme {

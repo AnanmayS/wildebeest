@@ -7,7 +7,13 @@
 //
 // Knobs: MOCK_DETECTORS (3 containers; plus one native MPS worker), MOCK_CLASSIFIERS (1),
 // MOCK_SPEED (1), MOCK_AUTOSTART (e.g. 1000 to start a sample job on boot),
-// MOCK_LEGACY=1 (behave like a v1 coordinator), MOCK_REPLACE_KILLED=0, MOCK_SEED_HISTORY=0.
+// MOCK_LEGACY=1 (behave like a v1 coordinator), MOCK_REPLACE_KILLED=0, MOCK_SEED_HISTORY=0,
+// MOCK_STRAGGLER=0 (no slow detector), MOCK_SPECULATION=0 (no speculative copies).
+//
+// Scenarios (not part of the coordinator's API):
+//   curl -XPOST localhost:3000/mock/kill-leader              # leader replica dies: 5 s lease, standby takes term + 1
+//   curl -XPOST 'localhost:3000/mock/kill-leader?mode=pause' # leader frozen 9 s: wakes up and gets fenced
+//   Straggler speculation happens on its own at the tail of every job (load a 300-photo sample).
 
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -125,6 +131,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route('GET', /^\/metrics$/)) return send(res, 200, sim.metrics());
+    if (!sim.LEGACY && route('GET', /^\/cluster$/)) return send(res, 200, sim.clusterView());
+
+    if (!sim.LEGACY && route('POST', /^\/mock\/kill-leader$/)) {
+      const [status, body] = sim.killLeader(url.searchParams.get('mode') === 'pause' ? 'pause' : 'kill');
+      // Clients whose WebSocket went through the dead replica lose it and reconnect via the balancer.
+      if (status === 200) for (const c of wss.clients) c.close(1012, 'replica gone');
+      return send(res, status, body);
+    }
 
     if (route('GET', /^\/events$/)) {
       return send(res, 200, { events: sim.recentEvents(Math.min(500, Number(url.searchParams.get('limit') ?? 200))) });

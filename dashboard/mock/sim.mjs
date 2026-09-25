@@ -7,6 +7,10 @@
 //   pause -> heartbeats stop -> declared dead after 6 s -> task reclaimed with epoch n+1 ->
 //            the frozen worker wakes, posts its result with epoch n -> 409 STALE_LEASE
 //   chaos -> a random busy container is killed every N seconds
+//   straggler -> one detector is ~8x slower (on probation); at a stage's tail its task gets a
+//            speculative copy on the fastest idle worker, and the first result wins
+//   failover -> POST /mock/kill-leader: the leader replica stops renewing its 5 s lease, the
+//            standby takes over with term + 1 (?mode=pause: the old leader wakes and is fenced)
 //
 // MOCK_LEGACY=1 turns it back into a v1 coordinator (no /system, no /benchmarks, no pause,
 // heartbeat-only death detection) so the dashboard's fallbacks can be checked.
@@ -18,6 +22,10 @@ export const LEGACY = process.env.MOCK_LEGACY === '1';
 const SPEED = Number(process.env.MOCK_SPEED ?? 1);
 const REPLACE_KILLED = process.env.MOCK_REPLACE_KILLED !== '0'; // re-scale so a long demo doesn't run dry
 const REVIEW_SECONDS_PER_IMAGE = 3;
+const STRAGGLER = process.env.MOCK_STRAGGLER !== '0';
+const SPECULATION = !LEGACY && process.env.MOCK_SPECULATION !== '0';
+const SPEC = { multiplier: 3, minMs: 1000, minSamples: 5, probationMultiplier: 3, intervalMs: 250 };
+const LEADER_TTL_MS = 5000;
 
 export const CONFIG = {
   claimMode: 'hybrid', leaseMs: 15000, heartbeatMs: 2000, workerTimeoutMs: 6000,
@@ -48,6 +56,7 @@ const cacheLog = []; // { at, hits, misses }, last 10 min
 let lastSweepRepaired = 0;
 let invariants = { checkedAt: new Date().toISOString(), duplicateResults: 0, stuckLeases: 0, lostImages: 0, ok: true };
 let finalisedTwice = 0;
+const speculation = { launched: 0, won: 0, wasted: 0 };
 
 const hex = (n) => randomBytes(n).toString('hex').slice(0, n);
 const iso = (ms) => (ms == null ? null : new Date(ms).toISOString());
@@ -89,24 +98,38 @@ export function addWorker(stage, { runtime = 'container', device = 'cpu', speed 
   return workers.get(id);
 }
 
-for (let i = 0; i < Number(process.env.MOCK_DETECTORS ?? 3); i++) addWorker('detect');
+// Three containers (one of them a throttled straggler, ~6 s per task, unless MOCK_STRAGGLER=0) + the native MPS worker.
+for (let i = 0; i < Number(process.env.MOCK_DETECTORS ?? 3) - (STRAGGLER ? 1 : 0); i++) addWorker('detect');
+if (STRAGGLER) addWorker('detect', { speed: 0.12 });
 if (!LEGACY) addWorker('detect', { runtime: 'native', device: 'mps', speed: 2.6, name: 'detect-mbp-m2' });
 for (let i = 0; i < Number(process.env.MOCK_CLASSIFIERS ?? 1); i++) addWorker('classify');
 
+const holdsLease = (w) => !!w.job && !w.job.copy && !w.job.cancelled && w.job.task.holder === w.id && !w.job.task.done;
+const runsCopy = (w) => !!w.job && w.job.copy && !w.job.cancelled && w.job.task.copy?.workerId === w.id;
+
 export function workerView(w) {
   const dead = w.status === 'DEAD';
-  const holds = w.job && w.job.task.holder === w.id;
+  const holds = holdsLease(w);
+  const copying = !dead && runsCopy(w);
   const view = {
-    id: w.id, stage: w.stage, status: w.status, state: dead ? 'dead' : holds ? 'busy' : 'idle',
+    id: w.id, stage: w.stage, status: w.status, state: dead ? 'dead' : holds || copying ? 'busy' : 'idle',
     containerId: w.containerId ?? '', tasksCompleted: w.tasksCompleted,
-    currentTaskIds: holds ? [w.job.task.id] : [],
+    currentTaskIds: holds && !dead ? [w.job.task.id] : [],
     currentImageUrl: holds && !dead ? imgUrl(w.job.task.item.info.idx) : null,
     avgLatencyMs: w.latencies.length ? Math.round(w.latencies.reduce((a, b) => a + b, 0) / w.latencies.length) : null,
     rssMb: dead ? null : w.rssMb + Math.round(Math.random() * 20),
     lastHeartbeatAt: iso(w.lastHeartbeatAt), reassignedCount: w.reassignedCount,
     registeredAt: iso(w.registeredAt), diedAt: iso(w.deadAt),
   };
-  if (!LEGACY) Object.assign(view, { runtime: w.runtime, device: w.device });
+  if (!LEGACY) {
+    Object.assign(view, {
+      runtime: w.runtime, device: w.device, hostname: w.id.replace(/^(detect|classify)-/, ''),
+      killedAt: iso(w.killedAt),
+      speculativeTaskIds: copying ? [w.job.task.id] : [],
+      probation: !dead && onProbation(w),
+      p50ServiceMs: workerP50(w),
+    });
+  }
   return view;
 }
 
@@ -166,7 +189,29 @@ function markDead(w, via, detectMs) {
     requeuedAt: null, reclaimedAt: null, reclaimedBy: null, tasks: 0, totalMs: null, detectMs: Math.round(detectMs),
   };
   const t = w.job?.task;
-  if (t && t.holder === w.id) {
+  if (w.job?.copy) {
+    // The copy's worker died: the copy is dropped, the original carries on.
+    if (t.copy?.workerId === w.id) t.copy = null;
+    w.job = null;
+    rec.totalMs = now - Date.parse(rec.killedAt);
+    recovery.push(rec);
+    if (recovery.length > 20) recovery.shift();
+    return;
+  }
+  const copyWorker = t?.copy && workers.get(t.copy.workerId);
+  if (t && t.holder === w.id && !t.done && copyWorker && copyWorker.status === 'ALIVE' && !copyWorker.pausedUntil && copyWorker.job?.task === t) {
+    // Promotion: the healthy speculative copy becomes the lease. Nothing is requeued or charged.
+    t.holder = copyWorker.id;
+    t.epoch = t.copy.epoch;
+    t.claimedAt = t.copy.startedAt;
+    t.copy = null;
+    copyWorker.job.copy = false;
+    copyWorker.job.promoted = true;
+    emit('reassigned', `${w.id} died; its speculative copy on ${copyWorker.id} took over task ${t.id.slice(0, 8)}… (epoch ${t.epoch})`, {
+      workerId: w.id, taskId: t.id, detail: { stage: t.stage, promoted: true, to: copyWorker.id, epoch: t.epoch, charged: false },
+    });
+    rec.totalMs = now - Date.parse(rec.killedAt);
+  } else if (t && t.holder === w.id) {
     // Requeue straight to the head of the ready queue (LPUSH after commit), not on the next tick.
     t.holder = null;
     t.attempts++;
@@ -217,7 +262,7 @@ export function createJob(name, indices, sampleSize = null) {
 }
 
 function newTask(job, item, stage, now) {
-  return { id: randomUUID(), job, item, stage, epoch: 0, attempts: 0, holder: null, pendingAt: now, dispatchMs: between(1, 4), recovery: null, done: false };
+  return { id: randomUUID(), job, item, stage, epoch: 0, maxEpoch: 0, copy: null, speculated: false, attempts: 0, holder: null, pendingAt: now, dispatchMs: between(1, 4), recovery: null, done: false };
 }
 
 function finalize(job, item, cacheHit = false) {
@@ -334,7 +379,9 @@ function claim(w, now) {
   do t = queues[w.stage].shift();
   while (t && (t.holder || t.done)); // duplicate IDs in a queue are harmless: skip non-PENDING tasks
   if (!t) return;
-  t.epoch++;
+  t.maxEpoch = (t.maxEpoch ?? 0) + 1; // epochs stay unique per task, copies included
+  t.epoch = t.maxEpoch;
+  t.copy = null; // a copy shadows one lease; a new claim invalidates it
   t.holder = w.id;
   t.claimedAt = now;
   const timings = serviceTimings(w);
@@ -351,8 +398,33 @@ function claim(w, now) {
 }
 
 function complete(w, now) {
-  const { task: t, epoch, timings, startedAt } = w.job;
+  const { task: t, epoch, timings, startedAt, copy, cancelled, promoted } = w.job;
   w.job = null;
+  // The other attempt won while this one was still valid: 409 ALREADY_DONE, result discarded, no event.
+  if (cancelled) return;
+  if (copy) {
+    if (t.done || t.copy?.workerId !== w.id || !t.holder) return; // dropped copy: fenced, nothing to record
+    // The copy's result commits first: it wins, and the original is told to cancel.
+    const original = workers.get(t.holder);
+    if (original?.job?.task === t) original.job.cancelled = true;
+    speculation.won++;
+    emit('speculation_won', `speculative copy on ${w.id} won task ${t.id.slice(0, 8)}…; ${t.holder} told to cancel`, {
+      workerId: w.id, taskId: t.id,
+      detail: { stage: t.stage, winner: w.id, epoch, originalWorker: t.holder, originalEpoch: t.epoch, originalAgeMs: now - t.claimedAt, promoted: false },
+    });
+    t.holder = w.id;
+    t.epoch = epoch;
+    t.copy = null;
+  } else if (t.holder === w.id && t.epoch === epoch && t.copy) {
+    // The original finished first: its copy was wasted.
+    const cw = workers.get(t.copy.workerId);
+    if (cw?.job?.task === t) cw.job.cancelled = true;
+    speculation.wasted++;
+    emit('speculation_wasted', `${w.id} finished task ${t.id.slice(0, 8)}… first; speculative copy on ${t.copy.workerId} wasted`, {
+      workerId: w.id, taskId: t.id, detail: { stage: t.stage, winner: w.id, epoch, speculativeWorker: t.copy.workerId, speculativeEpoch: t.copy.epoch },
+    });
+    t.copy = null;
+  }
   if (t.holder !== w.id || t.epoch !== epoch) {
     // Fenced: someone else holds a newer epoch (or already finished). The guarded UPDATE matches nothing.
     fencing.staleRejected++;
@@ -363,7 +435,7 @@ function complete(w, now) {
     return;
   }
   // ~0.2% of tasks hit a simulated MinIO timeout: released without spending an attempt.
-  if (Math.random() < 0.002) {
+  if (Math.random() < 0.002 && !t.speculated) {
     t.holder = null;
     t.pendingAt = now;
     queues[t.stage].unshift(t);
@@ -371,6 +443,12 @@ function complete(w, now) {
       workerId: w.id, taskId: t.id, detail: { reason: 'infra: S3 timeout', stage: t.stage },
     });
     return;
+  }
+  if (promoted) {
+    speculation.won++;
+    emit('speculation_won', `speculative copy on ${w.id} finished task ${t.id.slice(0, 8)}… after the original lost its lease`, {
+      workerId: w.id, taskId: t.id, detail: { stage: t.stage, winner: w.id, epoch, promoted: true },
+    });
   }
   t.holder = null;
   t.done = true;
@@ -418,6 +496,158 @@ function reRegister(w, now) {
   w.deadAt = null;
   w.zombie = false;
   w.lastHeartbeatAt = now;
+}
+
+// ---------------------------------------------------------------------------
+// Straggler speculation (docs/decisions/p3-speculation.md), every 250 ms per stage.
+
+const median = (arr) => (arr.length ? [...arr].sort((a, b) => a - b)[Math.floor(arr.length / 2)] : null);
+const stageP50 = (stage) => {
+  const svc = samples.filter((x) => x.stage === stage).map((x) => x.totalMs - x.queueWaitMs);
+  return svc.length >= SPEC.minSamples ? median(svc) : null;
+};
+function workerP50(w) {
+  return w.latencies.length >= 3 ? Math.round(median(w.latencies)) : null;
+}
+function onProbation(w) {
+  const mine = workerP50(w);
+  const stage = stageP50(w.stage);
+  return mine != null && stage != null && mine > SPEC.probationMultiplier * stage;
+}
+
+let lastSpeculation = 0;
+function speculate(now) {
+  if (!SPECULATION || now - lastSpeculation < SPEC.intervalMs) return;
+  lastSpeculation = now;
+  for (const stage of ['detect', 'classify']) {
+    if (queues[stage].length || (stage === 'detect' && backlog.length)) continue; // still work to hand out
+    const p50 = stageP50(stage);
+    if (p50 == null) continue;
+    const threshold = Math.max(SPEC.minMs, SPEC.multiplier * p50);
+    const idle = [...workers.values()]
+      .filter((w) => w.stage === stage && w.status === 'ALIVE' && !w.killedAt && !w.pausedUntil && !w.zombie && !w.job && !onProbation(w))
+      .sort((a, b) => (workerP50(a) ?? Infinity) - (workerP50(b) ?? Infinity));
+    const candidates = [...workers.values()]
+      .filter((w) => holdsLease(w) && w.stage === stage && !w.job.task.speculated && now - w.job.task.claimedAt > threshold)
+      .map((w) => w.job.task)
+      .sort((a, b) => a.claimedAt - b.claimedAt);
+    for (const t of candidates) {
+      const target = idle.find((w) => w.id !== t.holder);
+      if (!target) break;
+      idle.splice(idle.indexOf(target), 1);
+      t.maxEpoch++;
+      t.copy = { workerId: target.id, epoch: t.maxEpoch, startedAt: now };
+      t.speculated = true;
+      const timings = serviceTimings(target);
+      const total = timings.claimMs + timings.fetchMs + timings.inferMs + timings.uploadMs + timings.completeMs;
+      target.job = { task: t, epoch: t.maxEpoch, startedAt: now, endsAt: now + total, timings, copy: true };
+      speculation.launched++;
+      const ageMs = now - t.claimedAt;
+      emit('speculated', `task ${t.id.slice(0, 8)}… running ${(ageMs / 1000).toFixed(1)}s on ${t.holder} (threshold ${(threshold / 1000).toFixed(1)}s); speculative copy on ${target.id}`, {
+        workerId: target.id, taskId: t.id,
+        detail: {
+          stage, originalWorker: t.holder, originalEpoch: t.epoch, speculativeWorker: target.id, epoch: t.maxEpoch,
+          ageMs, thresholdMs: Math.round(threshold), stageP50Ms: Math.round(p50), multiplier: SPEC.multiplier, targetP50Ms: workerP50(target),
+        },
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Coordinator HA: two replicas, a 5 s leader lease renewed every second, terms.
+
+const coords = [
+  { id: 'coord-1', instance: randomUUID(), startedAt: iso(Date.now()), lastSeen: Date.now(), alive: true, wakeAt: null },
+  { id: 'coord-2', instance: randomUUID(), startedAt: iso(Date.now()), lastSeen: Date.now(), alive: true, wakeAt: null },
+];
+const lease = { holder: 'coord-1', term: 7, since: Date.now() - 12 * 60_000, renewedAt: Date.now(), electingAt: null };
+let lastRenewal = 0;
+
+/** POST /mock/kill-leader: the leader stops (kill) or freezes (pause, wakes after 9 s and is fenced). */
+export function killLeader(mode = 'kill') {
+  const c = coords.find((x) => x.id === lease.holder);
+  if (!c?.alive) return [409, { error: 'NO_LIVE_LEADER' }];
+  c.alive = false;
+  c.wakeAt = Date.now() + (mode === 'pause' ? 9000 : 60_000); // a killed replica is "restarted" a minute later
+  c.paused = mode === 'pause';
+  return [200, { ok: true, leader: c.id, term: lease.term, mode }];
+}
+
+function tickHa(now) {
+  if (now - lastRenewal < 1000) return;
+  lastRenewal = now;
+  for (const c of coords) {
+    if (c.alive) c.lastSeen = now;
+    else if (c.wakeAt && now >= c.wakeAt) {
+      c.alive = true;
+      c.wakeAt = null;
+      if (c.paused) {
+        // It still thinks it leads: its next guarded statement is refused by the term guard.
+        emit('leader_fenced', `stale leader ${c.id} (term ${lease.term - 1}) tried to write; rejected (term ${lease.term} is current)`, {
+          detail: { holder: c.id, term: lease.term - 1, currentTerm: lease.term, currentHolder: lease.holder },
+        });
+      } else {
+        c.instance = randomUUID();
+        c.startedAt = iso(now);
+      }
+      c.paused = false;
+    }
+  }
+  const holder = coords.find((c) => c.id === lease.holder);
+  if (holder?.alive && !lease.electingAt) {
+    lease.renewedAt = now;
+    return;
+  }
+  if (now < lease.renewedAt + LEADER_TTL_MS) return; // the old lease hasn't expired yet
+  const next = coords.find((c) => c.alive && c.id !== lease.holder) ?? coords.find((c) => c.alive);
+  if (!next) return;
+  if (!lease.electingAt) {
+    lease.electingAt = now; // acquired; reconcile + first sweep, then the events
+    return;
+  }
+  if (now - lease.electingAt < 150) return;
+  const prev = { holder: lease.holder, term: lease.term, renewedAt: lease.renewedAt };
+  lease.holder = next.id;
+  lease.term++;
+  lease.since = lease.electingAt;
+  lease.renewedAt = now;
+  lease.electingAt = null;
+  emitElection(prev, now);
+}
+
+function emitElection(prev, now, at) {
+  emit('leader_lost', `${prev.holder} lost the lead (term ${prev.term}, lease expired)`, {
+    detail: { holder: prev.holder, term: prev.term, reason: 'lease expired', renewedAt: iso(prev.renewedAt), expiresAt: iso(prev.renewedAt + LEADER_TTL_MS) },
+  });
+  const leaderlessMs = lease.since - prev.renewedAt;
+  emit('leader_elected', `${lease.holder} is the leader (term ${lease.term}), took over from ${prev.holder} after ${(leaderlessMs / 1000).toFixed(1)}s`, {
+    detail: {
+      holder: lease.holder, instance: coords.find((c) => c.id === lease.holder).instance, term: lease.term, since: iso(lease.since),
+      previousHolder: prev.holder, previousTerm: prev.term, previousRenewedAt: iso(prev.renewedAt), leaderlessMs,
+      reconcileMs: now - lease.since, rebuilt: 2, forgottenReplicas: [], coldStart: false,
+      firstSweep: { pushed: queues.detect.length + queues.classify.length, dead: 0, requeued: 0 },
+    },
+  });
+  if (at) for (const e of events.log.slice(-2)) e.at = iso(at);
+}
+
+export function clusterView() {
+  const now = Date.now();
+  const answering = coords.find((c) => c.alive) ?? coords[0];
+  const expiresAt = lease.renewedAt + LEADER_TTL_MS;
+  return {
+    self: { id: answering.id, instance: answering.instance, role: answering.id === lease.holder ? 'leader' : 'follower', term: answering.id === lease.holder ? lease.term : null },
+    leader: {
+      id: lease.holder, term: lease.term, since: iso(lease.since), renewedAt: iso(lease.renewedAt), expiresAt: iso(expiresAt),
+      valid: now < expiresAt, // the row can't know its holder died: it's valid until it expires
+    },
+    // The leader forgets a replica silent for longer than the lease TTL.
+    nodes: coords.filter((c) => now - c.lastSeen < LEADER_TTL_MS + 1000).map((c) => ({
+      id: c.id, instance: c.instance, role: c.id === lease.holder ? 'leader' : 'follower', term: c.id === lease.holder ? lease.term : null,
+      startedAt: c.startedAt, lastSeenAt: iso(c.lastSeen),
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +707,8 @@ function tick() {
     invariants = { checkedAt: iso(now), duplicateResults: finalisedTwice, stuckLeases: stuck, lostImages: 0, ok: finalisedTwice === 0 && stuck === 0 };
   }
 
+  speculate(now);
+  if (!LEGACY) tickHa(now);
   prune(now);
   for (const job of jobs) if (job.status === 'running') checkDone(job);
 }
@@ -541,13 +773,18 @@ function throughputSeries(now) {
 export function systemSnapshot() {
   const now = Date.now();
   const leases = [...workers.values()]
-    .filter((w) => w.job && w.job.task.holder === w.id)
+    .filter(holdsLease)
     .sort((a, b) => a.job.task.claimedAt - b.job.task.claimedAt)
     .slice(0, 40)
-    .map((w) => ({
-      taskId: w.job.task.id, workerId: w.id, stage: w.stage, epoch: w.job.epoch, ageMs: now - w.job.task.claimedAt,
-      attempt: w.job.task.attempts + 1, imageUrl: imgUrl(w.job.task.item.info.idx),
-    }));
+    .map((w) => {
+      const t = w.job.task;
+      return {
+        taskId: t.id, workerId: w.id, stage: w.stage, epoch: t.epoch, ageMs: now - t.claimedAt,
+        attempt: t.attempts + 1, imageUrl: imgUrl(t.item.info.idx),
+        copy: t.copy ? { workerId: t.copy.workerId, epoch: t.copy.epoch, ageMs: now - t.copy.startedAt } : null,
+      };
+    });
+  const alive = [...workers.values()].filter((w) => w.status === 'ALIVE');
   const hits = cacheLog.reduce((s, c) => s + c.hits, 0);
   const lookups = cacheLog.reduce((s, c) => s + c.hits + c.misses, 0);
   return {
@@ -563,8 +800,15 @@ export function systemSnapshot() {
     invariants,
     throughput: throughputSeries(now),
     cache: { hitsLast10m: hits, hitRatePct: lookups ? round((hits / lookups) * 100, 1) : 0 },
-    speculation: { launched: 0, won: 0, wasted: 0 },
-    leader: null,
+    speculation: {
+      ...speculation, enabled: SPECULATION,
+      running: [...workers.values()].filter((w) => w.status === 'ALIVE' && runsCopy(w)).length,
+      probation: alive.filter(onProbation).map((w) => ({
+        workerId: w.id, stage: w.stage, p50ServiceMs: workerP50(w), stageP50ServiceMs: Math.round(stageP50(w.stage)),
+      })),
+    },
+    // As the answering replica last saw it: during a failover it still names the old leader.
+    leader: { id: lease.holder, term: lease.term, since: iso(lease.since) },
   };
 }
 
@@ -587,5 +831,9 @@ if (!LEGACY && process.env.MOCK_SEED_HISTORY !== '0') {
     workerId: 'detect-ab12cd', taskId: fencing.last.taskId, detail: { action: 'complete', leaseEpoch: 3, currentEpoch: 4 },
   });
   events.log[events.log.length - 1].at = iso(at);
+  // ...and a past coordinator failover (coord-2 -> coord-1, term 6 -> 7), for the robust panel.
+  const failAt = Date.now() - 4 * 60_000;
+  lease.since = failAt - 160;
+  emitElection({ holder: 'coord-2', term: 6, renewedAt: failAt - 5310 }, failAt, failAt);
   events.outbox = [];
 }
