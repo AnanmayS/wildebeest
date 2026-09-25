@@ -3,7 +3,8 @@ CLASSIFIERS ?= 1
 SAMPLE_SIZE ?= 2000
 PYTHON ?= .venv/bin/python
 
-.PHONY: demo up down sample venv test test-coordinator test-worker test-integration benchmark benchmark-fake logs clean
+.PHONY: demo up down sample venv test test-coordinator test-worker test-invariants test-integration benchmark benchmark-fake \
+	bench-after bench-before faults observability native-worker logs clean
 
 ## Bring everything up with the sample dataset ready, then open http://localhost:8080
 demo: sample up
@@ -17,20 +18,33 @@ down:
 	docker compose down
 
 logs:
-	docker compose logs -f coordinator
+	docker compose logs -f coordinator coordinator-2
+
+## Grafana + Tempo + Prometheus (http://localhost:3300); traces from every task, sampled at 10%
+observability:
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.1 \
+		docker compose --profile observability up -d --build --scale detector=$(DETECTORS) --scale classifier=$(CLASSIFIERS)
+
+## Add a detector running natively on the Mac GPU (MPS) to the running stack
+native-worker:
+	scripts/native_worker.sh detect
 
 venv:
 	test -x $(PYTHON) || (uv venv --python 3.11 .venv && uv pip install --python $(PYTHON) -r scripts/requirements.txt)
+	uv pip install --python $(PYTHON) -q -r bench/requirements.txt -r worker/requirements-dev.txt
 
 ## Download the Snapshot Serengeti sample (skipped if data/sample/labels.csv already exists)
 sample: venv
 	test -f data/sample/labels.csv || $(PYTHON) scripts/download_sample.py --count $(SAMPLE_SIZE)
 
-test: test-coordinator test-worker
+test: test-coordinator test-worker test-invariants
 
 test-coordinator:
 	docker compose up -d postgres redis minio
 	cd coordinator && npm ci && npm test
+
+test-invariants:
+	$(PYTHON) -m pytest tests/invariants -q
 
 test-worker:
 	cd worker && ../$(PYTHON) -m pytest -q
@@ -50,3 +64,16 @@ benchmark-fake: sample
 
 clean:
 	docker compose down -v
+
+## Orchestration ceiling (fake tasks, 1-64 worker loops), open-loop latency and recovery distribution.
+## Each takes ~60-80 min; see docs/decisions/b-bench.md.
+bench-after: venv
+	$(PYTHON) bench/run.py --target . --mode synthetic --out benchmarks/ceiling/after
+
+BEFORE ?= ../wildebeest-before
+bench-before: venv
+	$(PYTHON) bench/run.py --target $(BEFORE) --mode sample --out benchmarks/ceiling/before
+
+## Seeded fault matrix (kill, pause, latency, reset, MinIO, Redis, coordinator) + invariant checker
+faults: venv
+	$(PYTHON) tests/invariants/faults.py --target . --runs 12 --seed 42
