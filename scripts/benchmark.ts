@@ -153,9 +153,28 @@ async function measureRecovery() {
   return { recoveryMs, tasksReclaimed: heldTasks.length };
 }
 
+function writeCsv(rows: Record<string, number | string>[]) {
+  const header = Object.keys(rows[0]);
+  fs.writeFileSync(path.join(OUT, "results.csv"), [header.join(","), ...rows.map((r) => header.map((h) => r[h]).join(","))].join("\n") + "\n");
+}
+
+/**
+ * macOS "System-wide memory free percentage" (NaN elsewhere). When the host runs short, macOS
+ * swaps out the Docker VM's memory and every number here becomes meaningless, so it is recorded.
+ */
+function hostFreePct(): number {
+  try {
+    const out = execSync("memory_pressure", { encoding: "utf8" });
+    return Number(out.match(/free percentage: (\d+)%/)?.[1] ?? NaN);
+  } catch {
+    return NaN;
+  }
+}
+
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
   const rows: Record<string, number | string>[] = [];
+  if (hostFreePct() < 20) console.warn(`WARNING: only ${hostFreePct()}% of host memory is free; results will be distorted.`);
 
   for (const detectors of DETECTORS) {
     const classifiers = classifiersFor(detectors);
@@ -163,8 +182,11 @@ async function main() {
     await scaleTo(detectors, classifiers);
     await api("POST", "/admin/clear-cache");
     const sampler = startMemorySampler();
+    let minFreePct = hostFreePct();
+    const freeTimer = setInterval(() => (minFreePct = Math.min(minFreePct, hostFreePct())), 30_000);
     const { jobId, wallMs, job } = await runJob(IMAGES);
     const peak = sampler.stop();
+    clearInterval(freeTimer);
     const lat = await latencyPercentiles(jobId);
     const row = {
       detectors,
@@ -178,9 +200,11 @@ async function main() {
       peak_detector_mib: Math.round(peak.detect),
       peak_classifier_mib: Math.round(peak.classify),
       empty_pct: job.impact?.emptyPct ?? "",
+      host_min_free_pct: minFreePct,
     };
     row.speedup = +(row.throughput_img_s / (rows[0]?.throughput_img_s as number ?? row.throughput_img_s)).toFixed(2);
     rows.push(row);
+    writeCsv(rows); // keep partial results if a later run fails
     console.log(row);
   }
 
@@ -192,9 +216,10 @@ async function main() {
   const recovery = await measureRecovery();
   console.log(recovery);
 
-  const header = Object.keys(rows[0]);
-  fs.writeFileSync(path.join(OUT, "results.csv"), [header.join(","), ...rows.map((r) => header.map((h) => r[h]).join(","))].join("\n") + "\n");
-  fs.writeFileSync(path.join(OUT, "extra.json"), JSON.stringify({ cacheRerunMs: rerun.wallMs, cacheHits: rerun.job.cacheHits, images: IMAGES, ...recovery }, null, 2));
+  fs.writeFileSync(
+    path.join(OUT, "extra.json"),
+    JSON.stringify({ cacheRerunMs: rerun.wallMs, cacheHits: rerun.job.cacheHits, images: IMAGES, ...recovery }, null, 2),
+  );
 
   execSync(`"${path.join(ROOT, ".venv/bin/python")}" plot_benchmark.py`, { cwd: path.join(ROOT, "scripts"), stdio: "inherit" });
   await pool.end();

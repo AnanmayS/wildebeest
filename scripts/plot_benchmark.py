@@ -40,13 +40,13 @@ lines = [
     "",
     "![Throughput vs workers](throughput.png)",
     "",
-    "| Detectors | Classifiers | Total (s) | Throughput (img/s) | Speedup | p50 (ms) | p95 (ms) | Peak detector RSS (MiB) | Peak classifier RSS (MiB) |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Detectors | Classifiers | Total (s) | Throughput (img/s) | Speedup | p50 (ms) | p95 (ms) | Peak detector RSS (MiB) | Peak classifier RSS (MiB) | Min host RAM free |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 ]
 for r in rows:
     lines.append(
         f"| {r['detectors']} | {r['classifiers']} | {r['total_s']} | {r['throughput_img_s']} | {r['speedup']}× "
-        f"| {r['p50_ms']} | {r['p95_ms']} | {r['peak_detector_mib']} | {r['peak_classifier_mib']} |"
+        f"| {r['p50_ms']} | {r['p95_ms']} | {r['peak_detector_mib']} | {r['peak_classifier_mib']} | {r.get('host_min_free_pct', '')}% |"
     )
 lines += [
     "",

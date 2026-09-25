@@ -53,7 +53,8 @@ interface GroupProps {
 }
 
 function Group({ title, subtitle, stage, workers, killRequested, workerTimeoutMs, now, onKill }: GroupProps) {
-  const mine = workers.filter((w) => w.stage === stage).sort(byRegistration);
+  // Workers that shut down cleanly (SIGTERM, scale-down) aren't news; only live and dead ones are shown.
+  const mine = workers.filter((w) => w.stage === stage && w.status !== 'STOPPED').sort(byRegistration);
   // diedAt when the coordinator sends it; otherwise the last heartbeat is a close enough proxy.
   const longDead = (w: Worker) =>
     w.status !== 'ALIVE' && now - Date.parse(w.diedAt ?? w.lastHeartbeatAt) > FULL_CARD_AFTER_DEATH_MS;
@@ -81,7 +82,7 @@ function Group({ title, subtitle, stage, workers, killRequested, workerTimeoutMs
         <div className="mt-2 flex flex-wrap gap-1.5">
           {chips.map((w) => (
             <span key={w.id} className="rounded-md border border-ember-400/25 bg-ember-600/10 px-2 py-0.5 font-mono text-[11px] text-ember-300/80">
-              {w.id.replace(/^(detect|classify)-/, '')} · {w.status === 'DEAD' ? `dead · ${w.reassignedCount} reassigned` : 'stopped'}
+              {w.id.replace(/^(detect|classify)-/, '')} · dead · {w.reassignedCount} reassigned
             </span>
           ))}
         </div>
