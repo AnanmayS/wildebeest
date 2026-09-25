@@ -30,12 +30,16 @@ class SpeciesNetClassifierModel:
     def __init__(self, model_name: str, geofence: bool = True, device: str = "cpu") -> None:
         from speciesnet import SpeciesNetClassifier, SpeciesNetEnsemble
 
+        from .tuning import channels_last
+
         self._cls = SpeciesNetClassifier(model_name, device=device)
+        self._cls.model = channels_last(self._cls.model.eval())
         self._ens = SpeciesNetEnsemble(model_name, geofence=geofence)
 
     def classify(
         self, img: PIL.Image.Image, detections: list[dict], country: str, sha256: str | None = None
     ) -> dict:
+        import torch
         from speciesnet import BBox
 
         detections = sort_detections(detections)
@@ -43,7 +47,8 @@ class SpeciesNetClassifierModel:
         bboxes = [BBox(*animal["bbox"])] if animal else []
 
         key = "image"
-        out = self._cls.predict(key, self._cls.preprocess(img, bboxes=bboxes))
+        with torch.inference_mode():
+            out = self._cls.predict(key, self._cls.preprocess(img, bboxes=bboxes))
         if "failures" in out:
             raise RuntimeError(f"classifier failed: {out['failures']}")
 

@@ -287,13 +287,39 @@ export async function createSampleJob(size: number, countryCode?: string | null)
 }
 
 // ---------------------------------------------------------------------------------------------
+/**
+ * Cancels a running job: its PENDING tasks become CANCELLED (the dispatcher and claim-confirm only
+ * touch PENDING tasks, so queued IDs are skipped when a worker pulls them). Tasks already LEASED
+ * finish normally; their results are stored and cached as usual. Returns false if the job wasn't running.
+ */
+export async function cancelJob(jobId: string): Promise<boolean> {
+  const events = await tx(async (c) => {
+    const { rows } = await c.query(
+      `update jobs set status = 'cancelled', finished_at = now() where id = $1 and status = 'running' returning name`,
+      [jobId],
+    );
+    if (rows.length === 0) return null;
+    const cancelled = await c.query(
+      `update tasks set state = 'CANCELLED', queued = false, finished_at = now()
+        where state = 'PENDING' and image_id in (select id from images where job_id = $1)`,
+      [jobId],
+    );
+    return recordEvents(c, [{ type: "job_cancelled", detail: { jobId, name: rows[0].name, tasks: cancelled.rowCount } }]);
+  });
+  if (!events) return false;
+  hub.publishEvents(events);
+  hub.jobChanged(jobId);
+  return true;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Read side
 // ---------------------------------------------------------------------------------------------
 
 export interface JobSummary {
   id: string;
   name: string;
-  status: "running" | "done";
+  status: "running" | "done" | "cancelled";
   createdAt: string;
   finishedAt: string | null;
   total: number;

@@ -38,7 +38,7 @@ export function useForgeGrid() {
       const stamped = { ...next, receivedAt: Date.now() };
       if (!cur || force) return stamped;
       if (cur.id !== next.id) return Date.parse(next.createdAt) > Date.parse(cur.createdAt) ? stamped : cur;
-      if (cur.status === 'done' && next.status !== 'done') return cur;
+      if (cur.status !== 'running' && next.status === 'running') return cur;
       return next.processed >= cur.processed ? stamped : cur;
     });
   }, []);

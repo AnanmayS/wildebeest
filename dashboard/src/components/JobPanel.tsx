@@ -84,14 +84,14 @@ function Throughput({ value }: { value: number }) {
   return <>{v.toFixed(1)}</>;
 }
 
-function StatusTag({ status }: { status: 'running' | 'done' }) {
-  return status === 'running' ? (
-    <span className="inline-flex items-center gap-1.5 text-leaf-400">
-      <span className="h-1.5 w-1.5 rounded-full bg-leaf-400 animate-pulse-dot" /> Running
-    </span>
-  ) : (
-    <span className="text-ink-300">Done</span>
-  );
+function StatusTag({ status }: { status: 'running' | 'done' | 'cancelled' }) {
+  if (status === 'running')
+    return (
+      <span className="inline-flex items-center gap-1.5 text-leaf-400">
+        <span className="h-1.5 w-1.5 rounded-full bg-leaf-400 animate-pulse-dot" /> Running
+      </span>
+    );
+  return <span className="text-ink-300">{status === 'done' ? 'Done' : 'Cancelled'}</span>;
 }
 
 function ThrottleBadge({ throttled, classifyQueue }: { throttled: boolean; classifyQueue: number }) {

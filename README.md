@@ -14,10 +14,11 @@ A fault-tolerant distributed pipeline that sorts wildlife camera-trap photos int
 
 | | |
 |---|---|
-| Throughput, 1 → 8 detector workers | {{THROUGHPUT_SPEEDUP}}× |
-| Recovery after a worker SIGKILL (kill → all its tasks re-claimed) | {{RECOVERY_S}} s |
-| Rerun of a 1,000-image batch from the content-hash cache | {{CACHE_RERUN_S}} s |
-| Photos filtered out as empty (1,000-image sample) | {{EMPTY_PCT}}% |
+| Orchestration throughput, 1 → 8 detector workers (fake 300 ms model) | 8.01× (linear) |
+| Real-model throughput on one M2 laptop (CPU-bound, see [Results](#results)) | 1.34 img/s |
+| Recovery after a worker SIGKILL (kill → all its tasks re-claimed) | 8.7 s (real models), 5.8 s (fake) |
+| Rerun of a 1,000-image batch from the content-hash cache | 0.10 s |
+| Photos filtered out as empty (300-image sample) | 71.7% |
 | Empty-vs-animal accuracy (2,000 labelled Snapshot Serengeti images) | 92.1% (95.2% with the classifier's `blank` override, which the pipeline applies) |
 | Top-1 species accuracy, 10 species | 86.0% |
 | Animal recall (animal photos sent to stage 2) | 97.0% |
@@ -175,13 +176,44 @@ Source: [worker/forgegrid_worker/runtime.py](worker/forgegrid_worker/runtime.py)
 
 ## Results
 
-{{BENCHMARK_TABLE}}
+Two sweeps, both with a cleared cache before each run ([benchmarks/results.md](benchmarks/results.md), [benchmarks/fake/results.md](benchmarks/fake/results.md)).
 
-![Throughput vs workers](benchmarks/throughput.png)
+**Orchestration: fake model (fixed 300 ms per task, no CPU), 1000 images.** This isolates the coordinator, queues and leases from ML compute.
 
-{{SCALING_ANALYSIS}}
+| Detectors | Classifiers | Wall time (s) | Throughput (img/s) | Speedup | p50 task time per image (ms) | p95 (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 346.5 | 2.89 | 1× | 338 | 683 |
+| 2 | 1 | 172.5 | 5.8 | 2.01× | 335 | 676 |
+| 4 | 1 | 95.2 | 10.5 | 3.63× | 330 | 667 |
+| 8 | 3 | 43.2 | 23.16 | 8.01× | 322 | 662 |
 
-Reproduce with `make benchmark`. It runs a fixed 1,000-image sample with 1, 2, 4, 6 and 8 detectors, classifiers at about 1 per 3 detectors, and a cleared cache before each run. Then it measures recovery after a SIGKILL and the cached rerun. Output: `benchmarks/results.csv`, `benchmarks/results.md`, `benchmarks/throughput.png`.
+![Orchestration scaling with a fake model](benchmarks/fake/throughput.png)
+
+**Real models (MegaDetector v5a @ 640 px + SpeciesNet) on one laptop, 300 images.** Apple M2, Docker Desktop VM with 8 vCPUs and 8 GB, 2 torch threads per worker.
+
+| Detectors | Classifiers | Wall time (s) | Throughput (img/s) | Speedup | p50 task time per image (ms) | p95 (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 247.1 | 1.21 | 1× | 787 | 1936 |
+| 2 | 1 | 224 | 1.34 | 1.11× | 1588 | 2817 |
+| 3 | 1 | 225.8 | 1.33 | 1.1× | 2364 | 3978 |
+| 4 | 1 | 230.7 | 1.3 | 1.07× | 3191 | 5250 |
+
+![Real-model throughput vs workers](benchmarks/throughput.png)
+
+**Where scaling flattens, and why.** The orchestration layer scales linearly: with a fake model, 8 detectors run 8.01× faster than 1 and per-task latency stays flat (~330 ms), so the coordinator, Redis and Postgres are not the bottleneck at this size. With real models, throughput is flat from the first worker: 1.21 img/s with 1 detector, 1.34 img/s at best, while each worker's per-image time grows in proportion to the worker count. The limit is the laptop, not the design. Running bare MegaDetector in 1, 2 and 4 containers side by side, with no pipeline at all, tops out at the same place:
+
+| Bare MegaDetector processes (no ForgeGrid) | Per-image time | Aggregate |
+| --- | --- | --- |
+| 1 × 2 threads | 0.67 s | 1.49 img/s |
+| 2 × 2 threads | 1.26–1.30 s | 1.56 img/s |
+| 4 × 2 threads | 1.74–1.87 s | 1.65 img/s |
+| 4 × 1 thread | 1.59–1.63 s | 1.86 img/s |
+
+YOLOv5x6's large convolutions saturate the M2's shared CPU and memory bandwidth inside the VM (4 performance + 4 efficiency cores) at under two images per second, and the pipeline reaches about 80% of that ceiling. More throughput needs more machines or a GPU, which is exactly what the worker pool is for: workers only need Redis, MinIO and HTTP to the coordinator, so the same containers scale across hosts. Memory is the other limit: a real detector holds ~1.1 GB, so an 8 GB Docker VM fits about 4 detectors + 1 classifier.
+
+Earlier runs on the same machine were 2–5× slower while macOS was swapping the Docker VM under memory pressure; the benchmark now records host free memory per run for that reason. CPU tuning that was measured and adopted or rejected is in [DECISIONS.md](docs/DECISIONS.md) (channels_last: −19% detector, −17% classifier; bf16, ONNX Runtime and Conv+BN fusion did not help).
+
+Reproduce with `make benchmark` (real models; `BENCH_IMAGES`, `BENCH_DETECTORS` override the defaults of 300 images and 1–4 detectors, since the PRD's 6 and 8 real detectors need ~15 GB for Docker) and `make benchmark-fake` (fake model, 1–8 detectors). Each run cancels leftover jobs, clears the cache, measures recovery after a SIGKILL and a cached rerun, and writes `results.csv`, `results.md` and `throughput.png`.
 
 ### Phase 1 baseline (single process, no distribution)
 

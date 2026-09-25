@@ -129,7 +129,7 @@ export async function maybeFinishJob(db: Db, jobId: string): Promise<EventInput 
   await db.query(`select id from jobs where id = $1 for update`, [jobId]);
   const { rows } = await db.query(
     `update jobs set status = 'done', finished_at = now()
-      where id = $1 and status <> 'done'
+      where id = $1 and status = 'running'
         and not exists (select 1 from images where job_id = $1 and final_category is null)
       returning name, total_images`,
     [jobId],

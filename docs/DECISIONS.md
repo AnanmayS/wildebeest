@@ -141,3 +141,20 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
    coordinator sets `forgegrid:queues-built`. Each dispatcher tick checks it; if it is gone (Redis restarted without
    persistence, or was flushed), the dispatcher runs the same rebuild as startup: clear the ready queues and mark every
    `PENDING` task unqueued so it is pushed again. Duplicate IDs this may create are harmless.
+41. **CPU inference tuning: channels_last, nothing else.** Measured in the worker image (linux/arm64 on an M2,
+   2 torch threads, median over 12 Serengeti images, same images for every variant):
+
+   | Variant | MegaDetector v5a @ 640 | SpeciesNet classifier |
+   | --- | --- | --- |
+   | fp32 baseline | 0.81 s | 0.37 s |
+   | Conv+BN `fuse()` | 0.81 s | – |
+   | **channels_last weights** | **0.66 s** (identical detections) | **0.31 s** (identical labels) |
+   | oneDNN bf16 fast-math (`DNNL_DEFAULT_FPMATH_MODE=BF16`) | 1.13–1.27 s | – |
+   | ONNX Runtime, opset 17, 2 intra-op threads (± arm64 bf16 GEMM) | 0.97–0.99 s | – |
+   | 1 / 4 torch threads | 0.92 s / 0.61 s | – |
+
+   Only channels_last is adopted (`worker/forgegrid_worker/tuning.py`). The VM does expose bf16/i8mm, but oneDNN's
+   bf16 path was slower for these convolutions. Two threads per worker stays the default: 4 threads buys ~8%, so on
+   8 vCPUs more 2-thread workers beat fewer 4-thread ones. Not tried: MegaDetector v1000 "cedar" (YOLOv9c, ~half the
+   FLOPs, GPL) — it needs threshold retuning and a new accuracy baseline, and its author reports only ~2× over MDv5a
+   at 1280, which is what 640 px already buys; a smaller model's main win here would be memory, i.e. more workers.

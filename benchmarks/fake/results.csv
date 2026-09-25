@@ -1,0 +1,5 @@
+detectors,classifiers,images,total_s,throughput_img_s,p50_ms,p95_ms,speedup,peak_detector_mib,peak_classifier_mib,empty_pct,host_min_free_pct
+1,1,1000,346.5,2.89,338,683,1,84,86,69.5,42
+2,1,1000,172.5,5.8,335,676,2.01,79,80,69.5,45
+4,1,1000,95.2,10.5,330,667,3.63,79,80,69.5,47
+8,3,1000,43.2,23.16,322,662,8.01,79,78,69.5,47

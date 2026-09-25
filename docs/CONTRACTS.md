@@ -153,6 +153,7 @@ image stays unfinalised. Else if any `human` ≥ threshold → `human`; else any
 
 `POST /jobs` multipart field `files` (many) + optional `countryCode` → `{ "jobId" }`
 `POST /jobs/sample` `{ "size": 1000, "countryCode": "TZA" }` → `{ "jobId" }` (size ≤ images available)
+`POST /jobs/:id/cancel` → `{ "ok": true }` (false if it wasn't running): PENDING tasks become `CANCELLED`, job status `cancelled`.
 `GET /jobs` → `{ "jobs": [JobSummary] }` newest first (dashboard uses it to find the active job)
 `GET /jobs/:id` → JobSummary:
 ```json

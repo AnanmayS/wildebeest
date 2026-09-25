@@ -59,6 +59,7 @@ const LOG_TYPES = new Set([
   "unthrottled",
   "failed",
   "job_done",
+  "job_cancelled",
 ]);
 
 const short = (id: string | null | undefined) => (id ? id.slice(0, 8) : "?");
@@ -88,6 +89,8 @@ export function describeEvent(e: EventRow): string {
         : `task ${short(e.taskId)}… failed on ${e.workerId} (attempt ${d.attempts}); retrying${d.error ? `: ${d.error}` : ""}`;
     case "job_done":
       return `job ${d.name ?? short(d.jobId as string)} done: ${d.total} images`;
+    case "job_cancelled":
+      return `job ${d.name ?? short(d.jobId as string)} cancelled (${d.tasks} pending tasks dropped)`;
     default:
       return e.type;
   }

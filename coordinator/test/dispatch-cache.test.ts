@@ -5,7 +5,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { config } from "../src/config.js";
 import { getPool, query } from "../src/db.js";
 import { dispatchOnce, isThrottled } from "../src/dispatcher.js";
-import { jobSummary, listSample, orderSample, parseCsv } from "../src/jobs.js";
+import { cancelJob, jobSummary, listSample, orderSample, parseCsv } from "../src/jobs.js";
 import { getRedis, keys } from "../src/redis.js";
 import { categorize, categorizeSpecies, enqueueClassify, storeDetection } from "../src/results.js";
 import { completeTask } from "../src/tasks.js";
@@ -52,6 +52,19 @@ describe("dispatcher", () => {
     await dispatchOnce();
     const ids = (await tasksOfJob(jobId)).map((t) => t.id);
     expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual(ids);
+  });
+
+  it("cancelling a job drops its pending tasks so they are never dispatched or claimed", async () => {
+    const { jobId } = await makeJob(["a", "b", "c"]);
+    await dispatchOnce();
+    expect(await cancelJob(jobId)).toBe(true);
+    expect((await tasksOfJob(jobId)).map((t) => t.state)).toEqual(["CANCELLED", "CANCELLED", "CANCELLED"]);
+
+    // IDs already in Redis are skipped at claim time.
+    const w = await registerTestWorker("detect", "w1");
+    expect(await pullAndClaim(w, "detect")).toBeNull();
+    expect((await dispatchOnce()).detect).toBe(0);
+    expect(await cancelJob(jobId)).toBe(false);
   });
 
   it("applies backpressure with hysteresis on queue:classify", async () => {

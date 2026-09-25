@@ -1,6 +1,7 @@
 """Turn benchmarks/results.csv + extra.json into throughput.png and results.md."""
 import csv
 import json
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -8,7 +9,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-OUT = Path(__file__).resolve().parent.parent / "benchmarks"
+OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "benchmarks"
+FAKE = OUT.name == "fake"
 
 rows = list(csv.DictReader(open(OUT / "results.csv")))
 extra = json.loads((OUT / "extra.json").read_text())
@@ -23,7 +25,11 @@ for w, t in zip(workers, throughput):
     ax.annotate(f"{t:.1f}", (w, t), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9)
 ax.set_xlabel("Detector workers (classifiers ≈ 1 per 3 detectors)")
 ax.set_ylabel("Throughput (images/sec)")
-ax.set_title(f"ForgeGrid throughput vs workers ({rows[0]['images']} images, CPU)")
+ax.set_title(
+    f"Fake model (fixed 300 ms/task): orchestration scaling, {rows[0]['images']} images"
+    if FAKE
+    else f"ForgeGrid throughput vs workers ({rows[0]['images']} images, CPU)"
+)
 ax.set_xticks(workers)
 ax.set_ylim(bottom=0)
 ax.grid(alpha=0.25)

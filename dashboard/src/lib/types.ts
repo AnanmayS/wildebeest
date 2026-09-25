@@ -5,7 +5,7 @@ export type Category = 'empty' | 'animal' | 'human' | 'vehicle' | 'failed';
 export interface JobSummary {
   id: string;
   name: string;
-  status: 'running' | 'done';
+  status: 'running' | 'done' | 'cancelled';
   createdAt: string;
   finishedAt: string | null;
   total: number;

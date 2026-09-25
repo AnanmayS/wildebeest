@@ -16,7 +16,8 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const OUT = path.join(ROOT, "benchmarks");
+// BENCH_TAG puts a run in its own folder, e.g. BENCH_TAG=fake for the fake-model sweep.
+const OUT = path.join(ROOT, "benchmarks", process.env.BENCH_TAG ?? "");
 const API = process.env.COORDINATOR_URL ?? "http://localhost:3000";
 const IMAGES = Number(process.env.BENCH_IMAGES ?? 1000);
 const DETECTORS = (process.env.BENCH_DETECTORS ?? "1,2,3,4").split(",").map(Number);
@@ -99,7 +100,14 @@ function startMemorySampler() {
   return { stop: () => ((running = false), peak) };
 }
 
+/** Leftover jobs (e.g. from an interrupted run) would compete for workers, so cancel them first. */
+async function cancelRunningJobs() {
+  const { jobs } = await api("GET", "/jobs");
+  for (const j of jobs.filter((j: any) => j.status === "running")) await api("POST", `/jobs/${j.id}/cancel`);
+}
+
 async function runJob(size: number) {
+  await cancelRunningJobs();
   const started = Date.now();
   const { jobId } = await api("POST", "/jobs/sample", { size, countryCode: "TZA" });
   await waitFor(async () => (await api("GET", `/jobs/${jobId}`)).status === "done", 90 * 60_000, `job ${jobId}`);
@@ -124,6 +132,7 @@ async function latencyPercentiles(jobId: string) {
 async function measureRecovery() {
   await scaleTo(RECOVERY_DETECTORS, classifiersFor(RECOVERY_DETECTORS));
   await api("POST", "/admin/clear-cache");
+  await cancelRunningJobs();
   const { jobId } = await api("POST", "/jobs/sample", { size: RECOVERY_IMAGES, countryCode: "TZA" });
   await waitFor(async () => (await api("GET", `/jobs/${jobId}`)).processed >= RECOVERY_IMAGES * 0.3, 30 * 60_000, "30% progress");
 
@@ -221,7 +230,7 @@ async function main() {
     JSON.stringify({ cacheRerunMs: rerun.wallMs, cacheHits: rerun.job.cacheHits, images: IMAGES, ...recovery }, null, 2),
   );
 
-  execSync(`"${path.join(ROOT, ".venv/bin/python")}" plot_benchmark.py`, { cwd: path.join(ROOT, "scripts"), stdio: "inherit" });
+  execSync(`"${path.join(ROOT, ".venv/bin/python")}" plot_benchmark.py "${OUT}"`, { cwd: path.join(ROOT, "scripts"), stdio: "inherit" });
   await pool.end();
 }
 

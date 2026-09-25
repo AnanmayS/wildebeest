@@ -13,6 +13,7 @@ const STYLE: Record<string, { label: string; cls: string }> = {
   stale_rejected: { label: 'Stale rejected', cls: 'text-violet-400 bg-violet-400/12' },
   cache_hit: { label: 'Cache hit', cls: 'text-sky-400 bg-sky-400/12' },
   job_done: { label: 'Job done', cls: 'text-leaf-400 bg-leaf-400/12' },
+  job_cancelled: { label: 'Cancelled', cls: 'text-ink-300 bg-ink-300/12' },
   chaos_on: { label: 'Chaos', cls: 'text-ember-300 bg-ember-400/8' },
   chaos_off: { label: 'Chaos', cls: 'text-ink-300 bg-ink-800' },
 };

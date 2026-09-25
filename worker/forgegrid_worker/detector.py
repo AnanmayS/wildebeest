@@ -27,6 +27,8 @@ class SpeciesNetDetectorModel:
     def __init__(self, model_name: str, device: str = "cpu", img_size: int = DETECTOR_IMG_SIZE) -> None:
         from speciesnet import SpeciesNetDetector
 
+        from .tuning import channels_last
+
         # preprocess() reads this class constant; there is no constructor argument for it.
         SpeciesNetDetector.IMG_SIZE = img_size
         self._det = SpeciesNetDetector(model_name)
@@ -35,9 +37,13 @@ class SpeciesNetDetectorModel:
         if self._det.device != device:
             self._det.model = self._det.model.to(device)
             self._det.device = device
+        self._det.model = channels_last(self._det.model.eval())
 
     def detect(self, img: PIL.Image.Image, sha256: str | None = None) -> list[dict]:
-        out = self._det.predict("image", self._det.preprocess(img))
+        import torch
+
+        with torch.inference_mode():
+            out = self._det.predict("image", self._det.preprocess(img))
         if "failures" in out:
             raise RuntimeError(f"detector failed: {out['failures']}")
         return [

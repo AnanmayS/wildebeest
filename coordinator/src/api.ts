@@ -5,7 +5,7 @@ import { config } from "./config.js";
 import { getPool, query } from "./db.js";
 import { killWorker, WorkerNotFoundError } from "./docker.js";
 import { recentLogEvents } from "./events.js";
-import { createJob, createSampleJob, jobImages, jobSummary, listJobs, SampleUnavailableError, sha256Of } from "./jobs.js";
+import { cancelJob, createJob, createSampleJob, jobImages, jobSummary, listJobs, SampleUnavailableError, sha256Of } from "./jobs.js";
 import { computeMetrics } from "./metrics.js";
 import { claimConfirm, completeTask, failTask, isUuid, ValidationError, type Outcome } from "./tasks.js";
 import { deregisterWorker, heartbeat, listWorkers, registerWorker } from "./workers.js";
@@ -71,6 +71,11 @@ export function createApp() {
     const job = isUuid(req.params.id) ? await jobSummary(req.params.id) : null;
     if (!job) return res.status(404).json({ error: "NOT_FOUND" });
     res.json(job);
+  });
+
+  app.post("/jobs/:id/cancel", async (req, res) => {
+    if (!isUuid(req.params.id)) return res.status(404).json({ error: "NOT_FOUND" });
+    res.json({ ok: await cancelJob(req.params.id) });
   });
 
   app.get("/jobs/:id/images", async (req, res) => {
