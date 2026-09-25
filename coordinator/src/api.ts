@@ -17,6 +17,7 @@ import {
   SampleUnavailableError,
   sha256Of,
 } from "./jobs.js";
+import { clusterStatus } from "./leader.js";
 import { computeMetrics } from "./metrics.js";
 import { systemSnapshot } from "./system.js";
 import {
@@ -153,12 +154,17 @@ export function createApp() {
     res.json({ ok: true });
   });
 
-  app.get("/chaos", (_req, res) => {
-    res.json(getChaos());
+  app.get("/chaos", async (_req, res) => {
+    res.json(await getChaos());
   });
 
-  app.post("/chaos", (req, res) => {
-    res.json(setChaos(req.body ?? {}));
+  app.post("/chaos", async (req, res) => {
+    res.json(await setChaos(req.body ?? {}));
+  });
+
+  // Which replica answered, who leads, and every live replica (HA; docs/decisions/h-ha.md).
+  app.get("/cluster", async (_req, res) => {
+    res.json(await clusterStatus());
   });
 
   app.get("/metrics", async (_req, res) => {

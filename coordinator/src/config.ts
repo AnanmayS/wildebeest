@@ -97,6 +97,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     speculateIntervalMs: num(env, "SPECULATE_INTERVAL_MS", 250),
     /** An offer the target worker hasn't claimed by then is dropped (and may go to another worker). */
     speculateOfferTtlMs: num(env, "SPECULATE_OFFER_TTL_MS", 3000),
+
+    // High availability (docs/decisions/h-ha.md). Every replica serves the API; one leader, elected
+    // through a lease row in Postgres, runs the singleton loops. COORDINATOR_ID names this replica
+    // (default: the hostname, i.e. the container ID); the lease lasts LEADER_TTL_MS and the leader
+    // renews it every LEADER_RENEW_MS.
+    coordinatorId: str(env, "COORDINATOR_ID", ""),
+    leaderTtlMs: num(env, "LEADER_TTL_MS", 5000),
+    leaderRenewMs: num(env, "LEADER_RENEW_MS", 1000),
   };
 }
 

@@ -279,8 +279,15 @@ export async function dispatchIdle() {
 
 const waiters: Record<Stage, Set<() => void>> = { detect: new Set(), classify: new Set() };
 
+/** Other replicas' long-polls are woken through the cluster bus (cluster.ts). */
+let wakeRelay: ((stages: Stage[]) => void) | null = null;
+export function setWakeRelay(fn: ((stages: Stage[]) => void) | null) {
+  wakeRelay = fn;
+}
+
 /** Wakes every POST /tasks/claim long-poll waiting on these stages. */
-export function wake(stages: Stage[] = STAGES) {
+export function wake(stages: Stage[] = STAGES, fromPeer = false) {
+  if (!fromPeer) wakeRelay?.(stages);
   for (const s of stages) {
     const ws = [...waiters[s]];
     waiters[s].clear();
@@ -336,6 +343,9 @@ async function updateThrottle(classifyQueue: number) {
   else if (throttled && classifyQueue < config.classifyQueueLowWater) changed = "unthrottled";
   if (!changed) return;
 
+  // Postgres holds the flag every replica reads (syncSharedState); on the leader this write is
+  // fenced like any other leader-only statement.
+  await query(`update coordinator_leader set throttled = $1 where id = 1`, [changed === "throttled"]);
   throttled = changed === "throttled";
   if (throttled) await getRedis().set(keys.throttled, "1");
   else await getRedis().del(keys.throttled);
@@ -355,17 +365,80 @@ async function updateThrottle(classifyQueue: number) {
 /**
  * Rebuilds the ready queues from Postgres, the source of truth: clear them and mark every PENDING
  * task unqueued, so the next dispatch re-pushes exactly the tasks that still need to run. Runs at
- * startup and whenever Redis turns out to have lost its data (restart without persistence,
+ * election of a new leader, when a coordinator replica disappears (it may have popped IDs it never
+ * leased), and whenever Redis turns out to have lost its data (restart without persistence,
  * FLUSHALL). IDs a worker already moved may end up queued twice; claim-confirm makes that harmless.
+ *
+ * The queues-built marker is deleted together with the queues and set again only after the
+ * Postgres half committed. So if this run stops half way (a deposed leader whose UPDATE is fenced
+ * off after its DEL went through, a crash), the marker is missing and the leader's next sweep
+ * rebuilds again: a DEL can never strand IDs that Postgres still counts as queued.
  */
-export async function rebuildQueues(reason: string) {
+export async function rebuildQueues(reason: string): Promise<number> {
   const redis = getRedis();
-  await redis.del(keys.queue("detect"), keys.queue("classify"), keys.throttled);
-  throttled = false;
+  await redis.del(keys.queue("detect"), keys.queue("classify"), keys.throttled, keys.queuesBuilt);
   lastTopUpAt = null;
   const { rowCount } = await query(`update tasks set queued = false where state = 'PENDING' and queued`);
+  await query(`update coordinator_leader set throttled = false where id = 1 and throttled`);
+  throttled = false;
   await redis.set(keys.queuesBuilt, new Date().toISOString());
   if (rowCount) console.log(`[dispatcher] rebuilt queues (${reason}): ${rowCount} pending tasks will be re-dispatched`);
+  return rowCount ?? 0;
+}
+
+/**
+ * Leader, every few seconds (hybrid mode): rows Postgres counts as queued (PENDING, queued=true)
+ * whose ID is in no Redis list any more are marked unqueued, so the repair sweep pushes them again.
+ * That happens when an ID was popped (complete-and-claim-next's LPOP) and the lease statement, and
+ * then the put-back, failed with their connection (a terminated backend) or died with their
+ * replica. The rebuild after a lost replica covers the second case; this covers the first, which
+ * otherwise waited for the next rebuild. Only rows pushed more than `minAgeMs` ago are considered,
+ * and every list is read in one MULTI (an atomic snapshot); an ID that is between a pop and its
+ * lease at that very moment is re-pushed as a duplicate, which claim-confirm makes harmless.
+ */
+export async function repairLostQueued(minAgeMs = 5000): Promise<number> {
+  if (!hybrid()) return 0;
+  const { rows } = await query<{ id: string }>(
+    `select id from tasks where state = 'PENDING' and queued
+        and pushed_at < now() - ($1::int * interval '1 millisecond')
+      limit 10000`,
+    [minAgeMs],
+  );
+  if (rows.length === 0) return 0;
+  const { rows: workers } = await query<{ id: string }>(
+    `select id from workers where status = 'ALIVE' or greatest(last_heartbeat_at, dead_at) > now() - interval '15 minutes'`,
+  );
+  const multi = getRedis().multi().lrange(keys.queue("detect"), 0, -1).lrange(keys.queue("classify"), 0, -1);
+  for (const w of workers) multi.lrange(keys.processing(w.id), 0, -1).lrange(keys.spec(w.id), 0, -1);
+  const present = new Set<string>();
+  for (const [err, ids] of (await multi.exec()) ?? []) {
+    if (err) throw err;
+    for (const id of ids as string[]) present.add(id);
+  }
+  const lost = rows.map((r) => r.id).filter((id) => !present.has(id));
+  if (lost.length === 0) return 0;
+  const { rowCount } = await query(
+    `update tasks set queued = false where id = any($1::uuid[]) and state = 'PENDING' and queued`,
+    [lost],
+  );
+  if (rowCount) console.warn(`[dispatcher] ${rowCount} queued task(s) were in no Redis list; re-dispatching them`);
+  return rowCount ?? 0;
+}
+
+/**
+ * A replica that is not the leader keeps its copy of the cluster-wide dispatcher state fresh: the
+ * throttle flag the leader decided (read by detect top-ups and Postgres-mode claims on every
+ * replica) and the worker/lease counts that size the detect queue and the finish-lock threshold.
+ */
+export async function syncSharedState() {
+  await refreshStats();
+  await loadThrottle();
+}
+
+/** The throttle flag as the leader last decided it. */
+export async function loadThrottle() {
+  const { rows } = await query<{ throttled: boolean }>(`select throttled from coordinator_leader where id = 1`);
+  throttled = rows[0]?.throttled ?? false;
 }
 
 /**

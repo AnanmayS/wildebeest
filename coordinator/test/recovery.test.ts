@@ -134,7 +134,11 @@ describe("docker event death watch", () => {
     docker.stream.write(line.slice(0, 20));
     docker.stream.write(line.slice(20));
     await eventually(async () => (await workerStatus(workerId)) === "DEAD");
-    const [died] = await events("worker_died");
+    // The DEAD mark commits a moment before its worker_died event.
+    const [died] = (await eventually(async () => {
+      const rows = await events("worker_died");
+      return rows.length > 0 ? rows : null;
+    }))!;
     expect(died.detail).toMatchObject({ via: "docker_event", dockerAction: "oom" });
   });
 

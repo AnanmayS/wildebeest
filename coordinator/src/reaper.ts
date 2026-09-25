@@ -51,6 +51,12 @@ export class StallMeter {
     return this.stalls.filter((s) => s.at >= at - this.windowMs).reduce((n, s) => n + s.ms, 0);
   }
 
+  /** Forget history, e.g. when this replica (re)gains the lead: the gap since it last reaped isn't a stall. */
+  reset() {
+    this.last = null;
+    this.stalls = [];
+  }
+
   stats(at = Date.now()) {
     const recent = this.stalls.filter((s) => s.at >= at - this.windowMs);
     return { graceMs: this.graceMs(at), stalls: recent.length, maxStallMs: Math.max(0, ...recent.map((s) => s.ms)) };

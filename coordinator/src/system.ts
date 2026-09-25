@@ -3,6 +3,7 @@ import { query } from "./db.js";
 import { detectQueueTarget, isThrottled, queueDepths } from "./dispatcher.js";
 import { latestInvariants, type InvariantReport } from "./invariants.js";
 import { speculationSummary, type Probation } from "./speculation.js";
+import { leaderView } from "./leader.js";
 import { presign } from "./storage.js";
 import { telemetry, type RecoveryRecord, type Stage, type TimingKey } from "./telemetry.js";
 
@@ -160,7 +161,7 @@ async function buildSnapshot(): Promise<SystemSnapshot> {
     })),
     cache: telemetry.cache(),
     speculation,
-    leader: null,
+    leader: leaderView(),
   };
 }
 

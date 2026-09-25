@@ -13,7 +13,7 @@ x-worker: &worker
   image: wildebeest-worker:${WORKER_TAG:-latest}
   restart: "no"
   depends_on:
-    coordinator:
+    coordinator-lb:
       condition: service_healthy
   volumes:
     - model-cache:/models
@@ -54,10 +54,19 @@ services:
       interval: 2s
       retries: 30
 
+  # Two coordinator replicas behind coordinator-lb (docs/decisions/h-ha.md). Both serve the whole
+  # API; the one holding the Postgres leader lease also runs the singleton loops. coordinator-2
+  # extends this service, so settings added here apply to both.
   coordinator:
     build: ./coordinator
+    image: wildebeest-coordinator:${WORKER_TAG:-latest}
     environment:
       <<: *model-env
+      COORDINATOR_ID: ${COORDINATOR_ID:-coord-1}
+      # Leader lease (River-style): renewed every LEADER_RENEW_MS, taken over LEADER_TTL_MS after the
+      # leader's last renewal.
+      LEADER_TTL_MS: ${LEADER_TTL_MS:-5000}
+      LEADER_RENEW_MS: ${LEADER_RENEW_MS:-1000}
       PORT: 3000
       DATABASE_URL: postgres://wildebeest:wildebeest@postgres:5432/wildebeest
       REDIS_URL: redis://redis:6379
@@ -98,7 +107,6 @@ services:
       SPECULATE_MULTIPLIER: ${SPECULATE_MULTIPLIER:-3}
       SPECULATE_MIN_MS: ${SPECULATE_MIN_MS:-1000}
       SPECULATE_PROBATION_MULTIPLIER: ${SPECULATE_PROBATION_MULTIPLIER:-3}
-    ports: ["${COORDINATOR_PORT:-3000}:3000"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data/sample:/data/sample:ro
@@ -112,12 +120,36 @@ services:
       interval: 2s
       retries: 60
 
+  coordinator-2:
+    extends: { service: coordinator }
+    environment:
+      COORDINATOR_ID: ${COORDINATOR_2_ID:-coord-2}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+
+  # The stable address workers and the dashboard use. Health-checks both replicas and routes around
+  # a dead or frozen one; the host port that used to be the coordinator's is now this one.
+  coordinator-lb:
+    image: haproxy:3.2-alpine
+    volumes:
+      - ./lb/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports: ["${COORDINATOR_PORT:-3000}:3000"]
+    depends_on:
+      coordinator: { condition: service_started }
+      coordinator-2: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/healthz"]
+      interval: 2s
+      retries: 60
+
   detector:
     <<: *worker
     environment:
       <<: *model-env
       WORKER_STAGE: detect
-      COORDINATOR_URL: http://coordinator:3000
+      COORDINATOR_URL: http://coordinator-lb:3000
       REDIS_URL: redis://redis:6379
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: minioadmin
@@ -139,7 +171,7 @@ services:
     environment:
       <<: *model-env
       WORKER_STAGE: classify
-      COORDINATOR_URL: http://coordinator:3000
+      COORDINATOR_URL: http://coordinator-lb:3000
       REDIS_URL: redis://redis:6379
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: minioadmin
@@ -158,7 +190,7 @@ services:
     build: ./dashboard
     ports: ["${DASHBOARD_PORT:-8080}:80"]
     depends_on:
-      coordinator: { condition: service_healthy }
+      coordinator-lb: { condition: service_healthy }
 
 volumes:
   pgdata:

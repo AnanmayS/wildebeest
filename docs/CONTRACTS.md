@@ -529,3 +529,62 @@ unchanged; the fields below are additive.
   separate lease items (the dashboard keys leases by task).
 - Worker objects (`GET /workers`, `worker_update`) gain `"speculativeTaskIds": []`, `"probation": bool`,
   `"p50ServiceMs": n | null`; `state` is `busy` while the worker runs a copy.
+
+## HA refinements (coordinator HA, 2026-09-25)
+
+Recorded by the coordinator-HA work (docs/decisions/h-ha.md, report item #12). Every HTTP and WebSocket
+shape above is unchanged; any replica answers any request.
+
+**Topology (docker-compose)**
+
+| Service          | Image/build                | Port (host)                    | Notes |
+|------------------|----------------------------|--------------------------------|-------|
+| coordinator      | ./coordinator              | none                           | replica `COORDINATOR_ID=coord-1` |
+| coordinator-2    | extends `coordinator`      | none                           | replica `COORDINATOR_ID=coord-2` |
+| coordinator-lb   | haproxy:3.2-alpine, `lb/haproxy.cfg` | `${COORDINATOR_PORT:-3000}` | round robin, `GET /healthz` every 1 s, a replica out after 2 failures (its connections are cut) |
+
+Workers use `COORDINATOR_URL=http://coordinator-lb:3000`; the dashboard's nginx proxies `/api/*` and `/api/events`
+to `coordinator-lb:3000`. New coordinator env: `COORDINATOR_ID` (default: hostname), `LEADER_TTL_MS` (5000),
+`LEADER_RENEW_MS` (1000).
+
+**Leadership.** One replica at a time holds the lease row `coordinator_leader` (migration 008) and runs the
+singleton work: the dispatcher's repair sweep and throttle decisions, the reaper (heartbeat deaths, lost leases,
+the job-finish sweep), the Docker death watch, chaos kills, replica-loss detection, leftover-pause cleanup, and the
+startup reconciliation (queue rebuild; worker/lease grace only on a cold start, i.e. when no heartbeat was processed
+for 2 × `HEARTBEAT_MS`). That reconciliation runs when a replica **wins an election**, never merely because a
+process started. Each acquisition increments `term`; every leader-only transaction begins with
+`wb_leader_guard(holder, instance, term)` and aborts with SQLSTATE `WBL01` if the term is no longer current.
+`task_events.leader_term` records the term of the transaction that inserted a row (NULL outside leader-only
+transactions); in id order it never decreases.
+
+**Postgres / Redis additions.** Tables `coordinator_leader` (also holds the shared `throttled` flag and the chaos
+switch `chaos_enabled`/`chaos_every_sec`) and `coordinator_nodes` (one row per live replica process). Redis pub/sub
+channel `wildebeest:cluster:<redis db>` (coordinators only) carries event-log rows, job/worker change notices, throttle
+changes, telemetry records, Postgres-mode long-poll wake-ups and "leader resigned". `wildebeest:throttled` stays
+informational (Postgres is the source); a queue rebuild deletes `wildebeest:queues-built` together with the queues
+and sets it again only after the Postgres half committed.
+
+**API.** `GET /cluster` → `{ "self": { "id", "instance", "role": "leader"|"follower", "term", "elections",
+"stepDowns", "fencedRejections", "lastStepDown" }, "leader": { "id", "term", "since", "renewedAt", "expiresAt",
+"valid" } | null, "nodes": [ { "id", "instance", "role", "term", "startedAt", "lastSeenAt" } ] }` (self = the replica
+that answered). `GET/POST /chaos` keep their shape; the switch is shared by all replicas and only the leader kills.
+A second pause of a worker through the *other* replica is not caught by `ALREADY_PAUSED` (Docker refuses it: 502).
+
+**`system` snapshot.** `leader` = `{ "id": COORDINATOR_ID of the lease holder, "term", "since" }` as the answering
+replica last saw it (at most `LEADER_RENEW_MS` old); null before any election. While a failover is in progress it
+still names the old leader (`GET /cluster` `leader.valid` tells). The in-memory telemetry (timings, throughput,
+dispatcher counters, recovery records, fencing) is replicated between replicas, so every replica reports the whole
+cluster; "since the coordinator started" now means since *that replica* started.
+
+**Events** (log types, shown in `/events` and the WS):
+- `leader_elected` `{ holder, instance, term, since, previousHolder, previousTerm, previousRenewedAt, leaderlessMs,
+  reconcileMs, rebuilt, forgottenReplicas, coldStart, firstSweep: { pushed, dead, requeued } }`, written by the new
+  leader **after its first full sweep** (so its `at` ends the failover clock).
+- `leader_lost` `{ holder, term, reason: "lease expired" | "resigned" | "lease lapsed (same replica)", renewedAt,
+  expiresAt }`, written by the next leader for the previous term.
+- `leader_fenced` `{ holder, term, currentTerm, currentHolder }`: a deposed leader's statement refused by the term
+  guard (written by the refused replica, outside any term).
+
+**Leftover pauses.** The leader unpauses a worker container still paused more than 2 s after its injected pause
+should have ended (the replica timing it died). It no longer unpauses every paused container of the project at
+startup, and never touches a container that isn't a registered worker.

@@ -1,7 +1,7 @@
 import type http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { config } from "./config.js";
-import type { Db } from "./db.js";
+import { getPool, query, type Db } from "./db.js";
 
 // ---------------------------------------------------------------------------------------------
 // task_events rows
@@ -26,7 +26,9 @@ export interface EventRow {
 /** Inserts task_events rows in one statement and returns them (with id/at) for publishing. */
 export async function recordEvents(db: Db, events: EventInput[]): Promise<EventRow[]> {
   if (events.length === 0) return [];
-  const { rows } = await db.query(
+  // On the shared pool, go through query() so a leader-only caller's insert is fenced too.
+  const run = (db as unknown) === getPool() ? query : db.query.bind(db);
+  const { rows } = await run(
     `insert into task_events (task_id, worker_id, type, detail)
      select * from unnest($1::uuid[], $2::text[], $3::text[], $4::jsonb[])
      returning id, at, type, task_id, worker_id, detail`,
@@ -69,6 +71,9 @@ const LOG_TYPES = new Set([
   "speculated",
   "speculation_won",
   "speculation_wasted",
+  "leader_elected",
+  "leader_lost",
+  "leader_fenced",
 ]);
 
 const short = (id: string | null | undefined) => (id ? id.slice(0, 8) : "?");
@@ -132,6 +137,13 @@ export function describeEvent(e: EventRow): string {
       return `job ${d.name ?? short(d.jobId as string)} done: ${d.total} images`;
     case "job_cancelled":
       return `job ${d.name ?? short(d.jobId as string)} cancelled (${d.tasks} pending tasks dropped)`;
+    case "leader_elected":
+      return `${d.holder} is the leader (term ${d.term})` +
+        (d.previousHolder ? `, took over from ${d.previousHolder} after ${Math.round((d.leaderlessMs ?? 0) / 100) / 10}s` : "");
+    case "leader_lost":
+      return `${d.holder} lost the lead (term ${d.term}, ${d.reason ?? "lease expired"})`;
+    case "leader_fenced":
+      return `stale leader ${d.holder} (term ${d.term}) tried to write; rejected (term ${d.currentTerm ?? "?"} is current)`;
     default:
       return e.type;
   }
@@ -184,6 +196,14 @@ type Builders = {
   workerList: () => Promise<unknown[]>;
   system?: () => Promise<unknown>;
 };
+
+/** Where the hub forwards its notifications for other replicas (cluster.ts). */
+export interface HubRelay {
+  jobChanged(jobId: string): void;
+  workersChanged(): void;
+  throttleChanged(throttled: boolean, classifyQueue: number): void;
+  publishEvents(rows: EventRow[]): void;
+}
 
 interface ClientState {
   ws: WebSocket;
@@ -256,24 +276,38 @@ class Hub {
     this.wss = null;
   }
 
-  jobChanged(jobId: string) {
+  // With several replicas (cluster.ts), each notification is also relayed to the other replicas
+  // over Redis pub/sub, so a dashboard connected to any replica sees everything. `fromPeer` marks
+  // a notification that arrived that way (it is applied locally, never relayed again).
+  private relay: HubRelay | null = null;
+
+  setRelay(relay: HubRelay | null) {
+    this.relay = relay;
+  }
+
+  jobChanged(jobId: string, fromPeer = false) {
+    if (!fromPeer) this.relay?.jobChanged(jobId);
     this.latestJobId = jobId;
     this.changedAt.set(`job:${jobId}`, Date.now());
     for (const c of this.clients) c.jobs.add(jobId);
   }
 
-  workersChanged() {
+  workersChanged(fromPeer = false) {
+    if (!fromPeer) this.relay?.workersChanged();
     this.changedAt.set("workers", Date.now());
     for (const c of this.clients) c.workers = true;
   }
 
-  throttleChanged(throttled: boolean, classifyQueue: number) {
+  throttleChanged(throttled: boolean, classifyQueue: number, fromPeer = false) {
+    if (!fromPeer) this.relay?.throttleChanged(throttled, classifyQueue);
     for (const c of this.clients) c.throttle = { type: "throttle", throttled, classifyQueue };
   }
 
-  publishEvents(rows: EventRow[]) {
-    const visible = rows.filter((r) => LOG_TYPES.has(r.type)).map(toLogItem);
-    if (visible.length === 0) return;
+  publishEvents(rows: EventRow[], fromPeer = false) {
+    const shown = rows.filter((r) => LOG_TYPES.has(r.type));
+    if (shown.length === 0) return;
+    if (!fromPeer) this.relay?.publishEvents(shown);
+    const visible = shown.map(toLogItem);
     for (const c of this.clients) {
       c.events.push(...visible);
       if (c.events.length > MAX_EVENT_BACKLOG) c.events.splice(0, c.events.length - MAX_EVENT_BACKLOG);

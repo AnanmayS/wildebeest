@@ -151,11 +151,16 @@ class Telemetry {
   // ---- recording ---------------------------------------------------------------------------
 
   recordCompletion(sample: TimingSample, taskId: string) {
+    this.recordSample(sample);
+    this.completeMsBacklog.push([taskId, sample.completeMs]);
+    if (this.completeMsBacklog.length > 100_000) this.completeMsBacklog.splice(0, 50_000);
+  }
+
+  /** A completion's waterfall sample (also how a completion handled by another replica arrives). */
+  recordSample(sample: TimingSample) {
     this.throughput.add(sample.stage, 1, sample.at);
     this.samples.push(sample);
     if (this.samples.length > this.maxSamples) this.samples.splice(0, this.samples.length - this.maxSamples);
-    this.completeMsBacklog.push([taskId, sample.completeMs]);
-    if (this.completeMsBacklog.length > 100_000) this.completeMsBacklog.splice(0, 50_000);
   }
 
   recordFinalized(n: number) {
@@ -225,6 +230,11 @@ class Telemetry {
       const dropped = this.recoveries.shift()!;
       for (const id of dropped.outstanding) this.recoveryByTask.delete(id);
     }
+  }
+
+  /** Whether a claim of this task would close (part of) an open recovery record. */
+  isRecovering(taskId: string): boolean {
+    return this.recoveryByTask.has(taskId);
   }
 
   /** Called with every successful claim: closes recoveries whose last task was re-claimed. */

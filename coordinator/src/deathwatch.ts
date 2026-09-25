@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import os from "node:os";
 import { config } from "./config.js";
 import { query } from "./db.js";
@@ -124,7 +125,9 @@ export class DeathWatch {
     );
 
     let buffer = "";
-    stream.on("data", (chunk: Buffer | string) => {
+    // Bound to the context connect() runs in: when a leader started the watch, its fence, so the
+    // recovery an event triggers is term-guarded whatever context the stream emits from.
+    stream.on("data", AsyncLocalStorage.bind((chunk: Buffer | string) => {
       buffer += chunk.toString();
       let nl: number;
       while ((nl = buffer.indexOf("\n")) >= 0) {
@@ -132,7 +135,7 @@ export class DeathWatch {
         buffer = buffer.slice(nl + 1);
         if (line) this.enqueue(line);
       }
-    });
+    }));
     let ended = false;
     const onEnd = (why: string) => {
       if (ended || this.stream !== stream) return;
@@ -142,9 +145,9 @@ export class DeathWatch {
       if (!this.stopped) console.warn(`[deathwatch] event stream ${why}; reconnecting`);
       this.scheduleReconnect();
     };
-    stream.on("end", () => onEnd("ended"));
-    stream.on("close", () => onEnd("closed"));
-    stream.on("error", (err: Error) => onEnd(`failed (${err.message})`));
+    stream.on("end", AsyncLocalStorage.bind(() => onEnd("ended")));
+    stream.on("close", AsyncLocalStorage.bind(() => onEnd("closed")));
+    stream.on("error", AsyncLocalStorage.bind((err: Error) => onEnd(`failed (${err.message})`)));
 
     // Anything that died while we weren't listening (startup, or the gap before this reconnect).
     this.chain = this.chain.then(() => this.reconcile()).catch(logError("reconcile"));
@@ -246,18 +249,31 @@ export async function resolveProject(): Promise<string | null> {
 }
 
 /**
- * Only this coordinator pauses containers (POST /workers/:id/pause) and it unpauses them on a
- * timer, so a paused container of our project at startup was left behind by a coordinator that
- * died mid-pause. Leaving it frozen would strand its memory forever.
+ * The coordinator replica that pauses a worker (POST /workers/:id/pause) unpauses it on a timer, so
+ * a worker container still paused after its pause should have ended was left behind by a replica
+ * that died mid-pause. Leaving it frozen would strand its memory forever. Run by the leader when
+ * elected and every few seconds after. Only containers of registered workers whose injected pause
+ * is over are touched: never a pause another live replica is still timing, and never a container
+ * that isn't a worker (e.g. a coordinator replica frozen by a failover test).
  */
-async function unpauseLeftovers(project: string) {
+export async function unpauseLeftovers(project = active?.project ?? null) {
+  if (!project) return;
   try {
     const frozen = await getDocker().listContainers({
       filters: { label: [`${PROJECT_LABEL}=${project}`], status: ["paused"] },
     });
-    for (const c of frozen) {
-      await getDocker().getContainer(c.Id).unpause();
-      console.log(`[deathwatch] unpaused ${c.Id.slice(0, 12)}, left paused by a previous coordinator`);
+    if (frozen.length === 0) return;
+    const { rows } = await query<{ full_id: string }>(
+      `select c.full_id from unnest($1::text[]) as c(full_id)
+        where exists (select 1 from workers w
+                       where w.runtime = 'container' and length(w.container_id) >= 12
+                         and left(c.full_id, length(w.container_id)) = w.container_id
+                         and w.paused_until is not null and w.paused_until < now() - interval '2 seconds')`,
+      [frozen.map((c) => c.Id)],
+    );
+    for (const { full_id } of rows) {
+      await getDocker().getContainer(full_id).unpause();
+      console.log(`[deathwatch] unpaused ${full_id.slice(0, 12)}, left paused by a coordinator that went away`);
     }
   } catch (err) {
     console.warn(`[deathwatch] could not check for paused containers: ${(err as Error).message}`);
@@ -287,12 +303,15 @@ export async function startDeathWatch(): Promise<DeathWatch | null> {
     return null;
   }
   await unpauseLeftovers(project);
-  active = new DeathWatch(getDocker() as unknown as DockerEventApi, project);
-  await active.start();
-  return active;
+  stopDeathWatch(); // at most one watcher per process, whichever leader term started it
+  const watch = new DeathWatch(getDocker() as unknown as DockerEventApi, project);
+  active = watch;
+  await watch.start();
+  return watch;
 }
 
-export function stopDeathWatch() {
-  active?.stop();
-  active = null;
+/** Stops `watch` (default: the active one). */
+export function stopDeathWatch(watch: DeathWatch | null = active) {
+  watch?.stop();
+  if (active === watch) active = null;
 }
