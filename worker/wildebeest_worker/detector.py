@@ -24,20 +24,24 @@ DETECTOR_IMG_SIZE = int(os.environ.get("DETECTOR_IMG_SIZE", "1280"))
 
 
 class SpeciesNetDetectorModel:
-    def __init__(self, model_name: str, device: str = "cpu", img_size: int = DETECTOR_IMG_SIZE) -> None:
+    def __init__(self, model_name: str, device: str | None = None, img_size: int = DETECTOR_IMG_SIZE) -> None:
         from speciesnet import SpeciesNetDetector
 
-        from .tuning import channels_last
+        from .tuning import announce_device, resolve_device, tune
 
+        # DEVICE env (auto|cpu|mps|cuda), default cpu; see tuning.resolve_device.
+        device = resolve_device(device)
         # preprocess() reads this class constant; there is no constructor argument for it.
         SpeciesNetDetector.IMG_SIZE = img_size
         self._det = SpeciesNetDetector(model_name)
-        # SpeciesNetDetector picks cuda/mps itself and has no device argument.
-        # Force CPU so a Mac host behaves like the (CPU-only) containers.
+        # SpeciesNetDetector picks cuda/mps itself and has no device argument, so move it to
+        # the device we chose. On CPU a Mac host then behaves like the (CPU-only) containers.
         if self._det.device != device:
             self._det.model = self._det.model.to(device)
             self._det.device = device
-        self._det.model = channels_last(self._det.model.eval())
+        self.device = device
+        self._det.model = tune(self._det.model, "detect", device)
+        announce_device(device)
 
     def detect(self, img: PIL.Image.Image, sha256: str | None = None) -> list[dict]:
         import torch

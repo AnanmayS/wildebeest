@@ -12,3 +12,5 @@ data/metadata/
 coverage/
 research_notes/
 reports/
+.claude/
+.venv-native/

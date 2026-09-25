@@ -3,7 +3,7 @@
 Uses the stage 1 detections from the lease; the detector is never re-run.
 
 SpeciesNet API used (speciesnet 5.0.5):
-    cls = SpeciesNetClassifier(model_name, device="cpu")
+    cls = SpeciesNetClassifier(model_name, device=DEVICE)   # cpu | mps | cuda
     pre = cls.preprocess(pil_image, bboxes=[BBox(x, y, w, h)])   # "always_crop" model:
                                                                  # crops to bboxes[0]
     out = cls.predict(filepath, pre)   # {"classifications": {"classes": [5], "scores": [5]}}
@@ -27,13 +27,16 @@ CROP_SIZE = 256
 
 
 class SpeciesNetClassifierModel:
-    def __init__(self, model_name: str, geofence: bool = True, device: str = "cpu") -> None:
+    def __init__(self, model_name: str, geofence: bool = True, device: str | None = None) -> None:
         from speciesnet import SpeciesNetClassifier, SpeciesNetEnsemble
 
-        from .tuning import channels_last
+        from .tuning import announce_device, resolve_device, tune
 
-        self._cls = SpeciesNetClassifier(model_name, device=device)
-        self._cls.model = channels_last(self._cls.model.eval())
+        # DEVICE env (auto|cpu|mps|cuda), default cpu; see tuning.resolve_device.
+        self.device = resolve_device(device)
+        self._cls = SpeciesNetClassifier(model_name, device=self.device)
+        self._cls.model = tune(self._cls.model, "classify", self.device)
+        announce_device(self.device)
         self._ens = SpeciesNetEnsemble(model_name, geofence=geofence)
 
     def classify(

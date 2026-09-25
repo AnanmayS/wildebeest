@@ -1,0 +1,7 @@
+# Native (non-container) worker on macOS, see scripts/native_worker.sh and docs/decisions/d-native.md.
+# The default PyPI wheels for macOS arm64 include the MPS (Metal) backend. Versions match the
+# container image (torch 2.14.0+cpu, torchvision 0.29.0+cpu) so both run the same kernels' numerics
+# on CPU and the same model code everywhere.
+torch==2.14.0
+torchvision==0.29.0
+-r requirements.txt
