@@ -18,6 +18,8 @@ import { SecondBuckets, percentile, telemetry } from "../src/telemetry.js";
 import { heartbeat, listWorkers } from "../src/workers.js";
 import {
   detectResult,
+  hybrid,
+  postgres,
   makeJob,
   pullAndClaim,
   registerTestWorker,
@@ -123,8 +125,8 @@ describe("GET /system", () => {
     expect(res.status).toBe(200);
     expectContractShape(res.body);
     expect(res.body).toMatchObject({
-      config: { claimMode: "hybrid", leaseMs: config.leaseMs, detectQueueTarget: config.detectQueueTarget },
-      dispatcher: { mode: "tick" },
+      config: { claimMode: config.claimMode, leaseMs: config.leaseMs, detectQueueTarget: hybrid ? config.detectQueueTarget : 0 },
+      dispatcher: { mode: "push" },
       queues: { detect: 0, classify: 0, throttled: false },
       leases: [],
       recovery: [],
@@ -178,7 +180,8 @@ describe("GET /system", () => {
       staleRejected: 1,
       last: { taskId: l2.taskId, workerId: dies, epoch: 1, currentEpoch: 2 },
     });
-    expect(s.dispatcher.pushedLast10s).toBeGreaterThanOrEqual(4); // 3 new + 1 recovered
+    // 3 new + 1 recovered (postgres mode has no push step)
+    expect(s.dispatcher.pushedLast10s).toBeGreaterThanOrEqual(hybrid ? 4 : 0);
     expect(s.dispatcher.repairSweepsLast10s).toBe(1);
 
     // The completion lands in the throughput series once its second is over.
@@ -195,10 +198,11 @@ describe("GET /system", () => {
   it("stores pushed_at, the worker's timings and (written behind) complete_ms on the task", async () => {
     const { jobId } = await makeJob(["t"]);
     await dispatchOnce();
-    const [t0] = await tasksOfJob(jobId);
-    expect(t0.pushed_at).not.toBeNull();
     const w = await registerTestWorker("detect", "w1");
     const l = (await pullAndClaim(w, "detect"))!;
+    // pushed_at: when it entered the ready queue (postgres mode: when it was claimed).
+    const [t0] = await tasksOfJob(jobId);
+    expect(t0.pushed_at).not.toBeNull();
     await completeTask(l.taskId, w, l.leaseEpoch, detectResult([]), { claimMs: 1, fetchMs: 2, inferMs: 3, uploadMs: 4 });
     expect(await task(l.taskId)).toMatchObject({
       timings: { claimMs: 1, fetchMs: 2, inferMs: 3, uploadMs: 4 },
@@ -220,14 +224,15 @@ describe("GET /system", () => {
 });
 
 describe("dispatch wait vs backlog", () => {
-  it("counts a backlog held behind DETECT_QUEUE_TARGET as queue wait, not orchestration", async () => {
+  // Postgres mode has no queue target to be held behind.
+  it.skipIf(postgres)("counts a backlog held behind DETECT_QUEUE_TARGET as queue wait, not orchestration", async () => {
     // One more task than the queue target: the last one waits in Postgres until there is room.
     const { jobId } = await makeJob(Array.from({ length: config.detectQueueTarget + 1 }, (_, i) => `b${i}`));
     await dispatchOnce();
     const w = await registerTestWorker("detect", "w1");
-    const first = (await pullAndClaim(w, "detect"))!;
     await new Promise((r) => setTimeout(r, 400)); // the backlog waits...
-    await dispatchOnce(); // ...until this sweep has room for it
+    const first = (await pullAndClaim(w, "detect"))!; // ...until a claim makes room (push mode)
+    await dispatchOnce(); // (tick mode: this sweep would push it)
     const tasks = await tasksOfJob(jobId);
     const last = tasks.at(-1)!;
     expect(last.pushed_at).not.toBeNull();
@@ -306,7 +311,9 @@ describe("synthetic jobs", () => {
          from images i join tasks t on t.image_id = i.id where i.job_id = $1`,
       [jobId],
     );
-    expect(rows[0]).toEqual({ n: 20_000, shas: 20_000, keys_ok: true, sha_ok: true, pending: 20_000 });
+    // Pushed right after the commit, up to the detect queue target (postgres mode: no queue).
+    const queued = hybrid ? config.detectQueueTarget : 0;
+    expect(rows[0]).toEqual({ n: 20_000, shas: 20_000, keys_ok: true, sha_ok: true, pending: 20_000 - queued });
     expect((await api("GET", `/jobs/${jobId}`)).body).toMatchObject({
       name: "synthetic-20000",
       status: "running",

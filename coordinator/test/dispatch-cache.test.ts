@@ -19,6 +19,7 @@ import {
   makeJob,
   pullAndClaim,
   registerTestWorker,
+  postgres,
   resetState,
   tasksOfJob,
   teardown,
@@ -28,7 +29,8 @@ beforeEach(resetState);
 afterAll(teardown);
 
 describe("dispatcher", () => {
-  it("tops queue:detect up to DETECT_QUEUE_TARGET, oldest first, and never above it", async () => {
+  it.skipIf(postgres)("tick mode: the sweep tops queue:detect up to DETECT_QUEUE_TARGET, oldest first, never above it", async () => {
+    config.dispatchMode = "tick"; // P1 behaviour; push mode is covered by push-dispatch.test.ts
     const { jobId } = await makeJob(Array.from({ length: 8 }, (_, i) => `img${i}`));
     const tasks = await tasksOfJob(jobId);
     expect(tasks.every((t) => t.state === "PENDING" && !t.queued)).toBe(true);
@@ -43,7 +45,7 @@ describe("dispatcher", () => {
     expect(await getRedis().llen(keys.queue("detect"))).toBe(config.detectQueueTarget);
   });
 
-  it("rebuilds the queues from Postgres when Redis loses its data", async () => {
+  it.skipIf(postgres)("rebuilds the queues from Postgres when Redis loses its data", async () => {
     const { jobId } = await makeJob(["a", "b", "c"]);
     await dispatchOnce();
     expect(await getRedis().llen(keys.queue("detect"))).toBe(3);
@@ -67,7 +69,8 @@ describe("dispatcher", () => {
     expect(await cancelJob(jobId)).toBe(false);
   });
 
-  it("applies backpressure with hysteresis on queue:classify", async () => {
+  // Postgres mode's backpressure (PENDING classify rows) is tested in push-dispatch.test.ts.
+  it.skipIf(postgres)("applies backpressure with hysteresis on queue:classify", async () => {
     const redis = getRedis();
     await makeJob(["a", "b", "c"]);
     const high = config.classifyQueueHighWater; // 5 in tests

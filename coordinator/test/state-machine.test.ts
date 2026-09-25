@@ -17,6 +17,8 @@ import {
   makeJob,
   pullAndClaim,
   registerTestWorker,
+  hybrid,
+  postgres,
   resetState,
   silenceWorker,
   task,
@@ -68,7 +70,8 @@ describe("claim", () => {
     expect(await task(taskId)).toMatchObject({ state: "LEASED", worker_id: winner, lease_epoch: 1 });
   });
 
-  it("refuses tasks of the other stage and claims from non-ALIVE workers, putting the ID back", async () => {
+  // Postgres mode: see push-dispatch.test.ts ("postgres claim mode").
+  it.skipIf(postgres)("refuses tasks of the other stage and claims from non-ALIVE workers, putting the ID back", async () => {
     const { taskId } = await oneDetectTask();
     const cls = await registerTestWorker("classify", "c1");
     expect(await claimConfirm(cls, [taskId])).toEqual([]);
@@ -196,20 +199,20 @@ describe("leases, retries and the reaper", () => {
       attempts: 1,
       lease_losses: 1,
       releases: 0,
-      queued: true,
+      queued: hybrid,
       worker_id: null,
     });
     const [ev] = await events("lease_expired", taskId);
     expect(ev.worker_id).toBe(w);
 
     // Pushed right after the requeue committed, not on the next dispatcher tick.
-    expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([taskId]);
+    if (hybrid) expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([taskId]);
     expect((await dispatchOnce()).retried).toBe(0);
     const again = await pullAndClaim(w, "detect");
     expect(again?.leaseEpoch).toBe(2);
   });
 
-  it("puts recovered work at the head of the queue, ahead of new tasks", async () => {
+  it.skipIf(postgres)("puts recovered work at the head of the queue, ahead of new tasks", async () => {
     const { jobId } = await makeJob(Array.from({ length: config.detectQueueTarget + 3 }, (_, i) => `img${i}`));
     await dispatchOnce();
     const w = await registerTestWorker("detect", "w1");
@@ -222,8 +225,10 @@ describe("leases, retries and the reaper", () => {
     expect((await dispatchOnce()).retried).toBe(0);
     const queue = await getRedis().lrange(keys.queue("detect"), 0, -1);
     expect(queue[0]).toBe(lease!.taskId);
-    expect(queue).toHaveLength(config.detectQueueTarget);
-    expect((await tasksOfJob(jobId)).filter((t) => t.queued)).toHaveLength(config.detectQueueTarget);
+    // The claim refilled the queue to its target at once (push mode); the retry sits on top of it,
+    // bypassing the target.
+    expect(queue).toHaveLength(config.detectQueueTarget + 1);
+    expect((await tasksOfJob(jobId)).filter((t) => t.queued)).toHaveLength(config.detectQueueTarget + 1);
   });
 
   it("moves a task to FAILED after MAX_ATTEMPTS and finalises the image as failed", async () => {
@@ -283,7 +288,7 @@ describe("leases, retries and the reaper", () => {
     expect(await task(taskId)).toMatchObject({ state: "PENDING", attempts: 1 });
   });
 
-  it("marks silent workers DEAD, reassigns their tasks, and drains their processing list", async () => {
+  it.skipIf(postgres)("marks silent workers DEAD, reassigns their tasks, and drains their processing list", async () => {
     await makeJob(["a", "b"]);
     await dispatchOnce();
     const dead = await registerTestWorker("detect", "dies");

@@ -1,8 +1,7 @@
 import { config } from "./config.js";
 import { query } from "./db.js";
-import { isThrottled } from "./dispatcher.js";
+import { detectQueueTarget, isThrottled, queueDepths } from "./dispatcher.js";
 import { latestInvariants, type InvariantReport } from "./invariants.js";
-import { getRedis, keys } from "./redis.js";
 import { presign } from "./storage.js";
 import { telemetry, type RecoveryRecord, type Stage, type TimingKey } from "./telemetry.js";
 
@@ -57,19 +56,12 @@ const MAX_LEASES = 40;
 const SNAPSHOT_TTL_MS = 400;
 const STAGES: Stage[] = ["detect", "classify"];
 
-/** Dispatch mode as reported to the dashboard. P2's push-after-commit dispatcher flips this. */
-let dispatcherMode: "tick" | "push" = "tick";
-export const setDispatcherMode = (mode: "tick" | "push") => {
-  dispatcherMode = mode;
-};
 
 const perSec = (n: number, seconds: number) => Math.round((n / seconds) * 100) / 100;
 
 async function buildSnapshot(): Promise<SystemSnapshot> {
-  const redis = getRedis();
-  const [detectQ, classifyQ, alive, inFlight, leaseRows, invariants] = await Promise.all([
-    redis.llen(keys.queue("detect")),
-    redis.llen(keys.queue("classify")),
+  const [depths, alive, inFlight, leaseRows, invariants] = await Promise.all([
+    queueDepths(),
     query<{ stage: Stage; n: number }>(`select stage, count(*)::int as n from workers where status = 'ALIVE' group by stage`),
     query<{ stage: Stage; n: number }>(`select stage, count(*)::int as n from tasks where state = 'LEASED' group by stage`),
     query(
@@ -120,18 +112,21 @@ async function buildSnapshot(): Promise<SystemSnapshot> {
       leaseMs: config.leaseMs,
       heartbeatMs: config.heartbeatMs,
       workerTimeoutMs: config.workerTimeoutMs,
-      detectQueueTarget: config.detectQueueTarget,
+      // The effective depth (it scales with live detect workers unless DETECT_QUEUE_TARGET pins it);
+      // 0 in postgres claim mode, which has no ready queue.
+      detectQueueTarget: config.claimMode === "hybrid" ? detectQueueTarget() : 0,
       classifyHighWater: config.classifyQueueHighWater,
       classifyLowWater: config.classifyQueueLowWater,
       modelBackend: config.modelBackend,
     },
     dispatcher: {
-      mode: dispatcherMode,
+      mode: config.dispatchMode,
       pushedLast10s: telemetry.dispatch.sum("pushed", 10),
       repairSweepsLast10s: telemetry.dispatch.sum("sweeps", 10),
       lastSweepRepaired: telemetry.lastSweepRepaired,
     },
-    queues: { detect: detectQ, classify: classifyQ, throttled: isThrottled() },
+    // Ready work: Redis list lengths (hybrid) or claimable PENDING rows (postgres).
+    queues: { detect: depths.detect, classify: depths.classify, throttled: isThrottled() },
     stages,
     leases,
     timings: telemetry.timings(),

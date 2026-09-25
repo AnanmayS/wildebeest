@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import type { Db } from "./db.js";
+import { finishLockThreshold } from "./dispatcher.js";
 import type { EventInput } from "./events.js";
 
 // Idempotent result storage and image/job finalisation.
@@ -98,42 +99,39 @@ export async function enqueueClassify(db: Db, imageId: string): Promise<string |
   return rows[0]?.id ?? null;
 }
 
-/** Sets the image's final category once. Returns the job ID if this call finalised it. */
+/**
+ * Sets the image's final category once (wb_finalize_image, migration 006, applies the "blank"
+ * rule too). Returns the job ID if this call finalised it.
+ */
 export async function finalizeImage(
   db: Db,
   imageId: string,
   category: Category,
   species?: ClassificationRow | null,
 ): Promise<string | null> {
-  if (category === "animal" && categorizeSpecies(species) === "empty") {
-    category = "empty";
-    species = null;
-  }
-  const { rows } = await db.query(
-    `update images set final_category = $2, species_label = $3, species_common_name = $4, species_conf = $5,
-            finalized_at = now()
-      where id = $1 and final_category is null
-      returning job_id`,
-    [imageId, category, species?.label ?? null, species?.commonName ?? null, species?.confidence ?? null],
-  );
+  const { rows } = await db.query(`select wb_finalize_image($1, $2, $3, $4, $5) as job_id`, [
+    imageId,
+    category,
+    species?.label ?? null,
+    species?.commonName ?? null,
+    species?.confidence ?? null,
+  ]);
   return rows[0]?.job_id ?? null;
 }
 
 /**
- * Marks the job done if every image has a final category. Must run inside the transaction that
- * finalised the image. Locking the job row first serialises concurrent "last image" completions:
- * the second one waits, then re-checks with a fresh snapshot that sees the first one's commit,
- * so the job can't be left 'running' when two final images finish at the same moment.
+ * Marks the job done if every image has a final category (wb_finish_job, migration 006). Must run
+ * inside the transaction that finalised the image. The job row is only locked near the end of a
+ * job (at most `lockThreshold` unfinalised images left), which serialises two "last" images
+ * finishing at once; earlier finalisations skip the lock entirely, and the reaper's sweep
+ * (finishCompletedJobs) covers a race the threshold misses.
  */
-export async function maybeFinishJob(db: Db, jobId: string): Promise<EventInput | null> {
-  await db.query(`select id from jobs where id = $1 for update`, [jobId]);
-  const { rows } = await db.query(
-    `update jobs set status = 'done', finished_at = now()
-      where id = $1 and status = 'running'
-        and not exists (select 1 from images where job_id = $1 and final_category is null)
-      returning name, total_images`,
-    [jobId],
-  );
+export async function maybeFinishJob(
+  db: Db,
+  jobId: string,
+  lockThreshold = finishLockThreshold(),
+): Promise<EventInput | null> {
+  const { rows } = await db.query(`select name, total from wb_finish_job($1, $2)`, [jobId, lockThreshold]);
   if (rows.length === 0) return null;
-  return { type: "job_done", detail: { jobId, name: rows[0].name, total: rows[0].total_images } };
+  return { type: "job_done", detail: { jobId, name: rows[0].name, total: rows[0].total } };
 }

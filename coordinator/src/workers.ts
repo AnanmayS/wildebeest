@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { getPool, query } from "./db.js";
 import { hub, recordEvents } from "./events.js";
 import { getRedis, keys } from "./redis.js";
+import { refreshStats } from "./dispatcher.js";
 import { presign } from "./storage.js";
 import { isUuid, releaseWorkerTasks, requeueWaiting, ValidationError } from "./tasks.js";
 
@@ -72,13 +73,18 @@ export async function registerWorker(body: {
   );
   await setAlive(id);
   hub.workersChanged();
+  void refreshStats().catch(() => {}); // the detect queue target scales with live workers
   console.log(`[workers] registered ${id} (${runtime}/${device}, container ${containerId})`);
   return {
     workerId: id,
     config: {
       heartbeatMs: config.heartbeatMs,
       leaseMs: config.leaseMs,
+      // The worker sizes its claim batch between these two (≈ round trip ÷ service time).
       claimBatchSize: config.claimBatchSize,
+      maxClaimBatch: Math.max(config.claimBatchSize, config.maxClaimBatch),
+      // hybrid: BLMOVE + claim-confirm; postgres: long-poll POST /tasks/claim.
+      claimMode: config.claimMode,
       animalConfThreshold: config.animalConfThreshold,
     },
   };
@@ -94,19 +100,31 @@ export async function registerWorker(body: {
 export async function heartbeat(workerId: string, metrics: unknown, taskIds: unknown = []): Promise<boolean> {
   const m = metrics && typeof metrics === "object" ? metrics : {};
   const held = Array.isArray(taskIds) ? taskIds.filter(isUuid) : [];
-  const { rowCount } = await query(
-    `update workers set last_heartbeat_at = now(), metrics = $2 where id = $1 and status = 'ALIVE'`,
-    [workerId, JSON.stringify(m)],
+  // One statement. An idle worker (nothing held) never touches tasks. Renewal skips rows a
+  // completion is holding right now (SKIP LOCKED): those leases are ending anyway, and waiting on
+  // them could deadlock against a batch that locks the same rows in a different order.
+  const { rows } = await query<{ alive: boolean }>(
+    held.length === 0
+      ? `update workers set last_heartbeat_at = now(), metrics = $2 where id = $1 and status = 'ALIVE'
+         returning true as alive`
+      : `with w as (
+           update workers set last_heartbeat_at = now(), metrics = $2 where id = $1 and status = 'ALIVE'
+           returning id
+         ),
+         renewed as (
+           update tasks set lease_expires_at = now() + ($3::int * interval '1 millisecond')
+            where id in (select id from tasks
+                          where id = any($4::uuid[]) and worker_id = $1 and state = 'LEASED'
+                            and exists (select 1 from w)
+                          for update skip locked)
+         )
+         select true as alive from w`,
+    held.length === 0 ? [workerId, JSON.stringify(m)] : [workerId, JSON.stringify(m), config.leaseMs, held],
   );
-  if (!rowCount) {
+  if (rows.length === 0) {
     await recordRefusedHeartbeat(workerId, held);
     return false;
   }
-  await query(
-    `update tasks set lease_expires_at = now() + ($2::int * interval '1 millisecond')
-      where worker_id = $1 and state = 'LEASED' and id = any($3::uuid[])`,
-    [workerId, config.leaseMs, held],
-  );
   await setAlive(workerId);
   hub.workersChanged();
   return true;
@@ -140,6 +158,7 @@ export async function deregisterWorker(workerId: string): Promise<boolean> {
   await drainProcessingList(workerId);
   await getRedis().del(keys.alive(workerId));
   hub.workersChanged();
+  void refreshStats().catch(() => {});
   return Boolean(rowCount);
 }
 

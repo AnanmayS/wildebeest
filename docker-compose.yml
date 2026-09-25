@@ -71,11 +71,19 @@ services:
       HEARTBEAT_MS: ${HEARTBEAT_MS:-2000}
       WORKER_TIMEOUT_MS: ${WORKER_TIMEOUT_MS:-6000}
       MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      # Workers size their claim batch online (≈ round trip ÷ service time) between these two.
       CLAIM_BATCH_SIZE: ${CLAIM_BATCH_SIZE:-1}
+      MAX_CLAIM_BATCH: ${MAX_CLAIM_BATCH:-16}
+      # hybrid (Redis ready queues) | postgres (workers long-poll POST /tasks/claim, SKIP LOCKED).
+      CLAIM_MODE: ${CLAIM_MODE:-hybrid}
+      # push (push after commit, 200 ms repair sweep) | tick (the P1 dispatcher, for A/B runs).
+      DISPATCH_MODE: ${DISPATCH_MODE:-push}
       ANIMAL_CONF_THRESHOLD: ${ANIMAL_CONF_THRESHOLD:-0.2}
       CLASSIFY_QUEUE_HIGH_WATER: ${CLASSIFY_QUEUE_HIGH_WATER:-500}
       CLASSIFY_QUEUE_LOW_WATER: ${CLASSIFY_QUEUE_LOW_WATER:-200}
-      DETECT_QUEUE_TARGET: ${DETECT_QUEUE_TARGET:-50}
+      # Empty = scale queue:detect with live detect workers × claim batch (floor DETECT_QUEUE_MIN).
+      DETECT_QUEUE_TARGET: ${DETECT_QUEUE_TARGET:-}
+      DETECT_QUEUE_MIN: ${DETECT_QUEUE_MIN:-8}
       DEFAULT_COUNTRY: ${DEFAULT_COUNTRY:-TZA}
       HUMAN_REVIEW_SECONDS_PER_IMAGE: ${HUMAN_REVIEW_SECONDS_PER_IMAGE:-3}
       # Docker die/oom events as the fast failure detector (auto | off); heartbeats stay the backstop.
@@ -109,6 +117,11 @@ services:
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: wildebeest
       FAKE_MODEL_DELAY_MS: ${FAKE_MODEL_DELAY_MS:-300}
+      # Report buffering: 0 = auto (flush every claim batch), 1 = one complete per task.
+      COMPLETE_BATCH: ${COMPLETE_BATCH:-0}
+      COMPLETE_FLUSH_MS: ${COMPLETE_FLUSH_MS:-50}
+      # Download the next leased image while the current one runs (0 = off).
+      PREFETCH: ${PREFETCH:-1}
     deploy:
       resources:
         limits:
@@ -126,6 +139,9 @@ services:
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: wildebeest
       FAKE_MODEL_DELAY_MS: ${FAKE_MODEL_DELAY_MS:-300}
+      COMPLETE_BATCH: ${COMPLETE_BATCH:-0}
+      COMPLETE_FLUSH_MS: ${COMPLETE_FLUSH_MS:-50}
+      PREFETCH: ${PREFETCH:-1}
     deploy:
       resources:
         limits:

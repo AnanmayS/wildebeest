@@ -5,7 +5,8 @@ import { reaperStalls } from "./reaper.js";
 import { getRedis, keys } from "./redis.js";
 
 /**
- * Recovery time per dead worker: from its DEAD mark (and from its kill, when killed via the API)
+ * Recovery time per dead worker (the 50 most recent deaths of the last hour, so the lateral join
+ * over task_events stays bounded however long the coordinator has been running): from its DEAD mark (and from its kill, when killed via the API)
  * until every task reassigned away from it had been claimed again by a live worker. Workers whose
  * reassigned tasks are not all re-claimed yet are reported with recovered=false.
  */
@@ -21,7 +22,8 @@ export async function recoveryStats() {
          select min(e.at) as claimed_at from task_events e
           where e.task_id = r.task_id and e.type = 'claimed' and e.at >= r.at
        ) c on true
-      where w.dead_at is not null
+      where w.id in (select id from workers where dead_at > now() - interval '1 hour'
+                      order by dead_at desc limit 50)
       group by w.id
       order by w.dead_at`,
   );
@@ -54,7 +56,27 @@ async function latencyFor(jobId: string) {
   return { p50: Math.round(rows[0].p50 ?? 0), p95: Math.round(rows[0].p95 ?? 0), samples: rows[0].n as number };
 }
 
-export async function computeMetrics() {
+let cachedMetrics: { at: number; value: Promise<Awaited<ReturnType<typeof buildMetrics>>> } | null = null;
+
+/** GET /metrics, shared by every caller for 1 s (it runs a latency percentile per recent job). */
+export function computeMetrics() {
+  const now = Date.now();
+  if (!cachedMetrics || now - cachedMetrics.at >= 1000) {
+    const value = buildMetrics();
+    cachedMetrics = { at: now, value };
+    value.catch(() => {
+      if (cachedMetrics?.value === value) cachedMetrics = null;
+    });
+  }
+  return cachedMetrics.value;
+}
+
+/** Test hook. */
+export function resetMetricsCache() {
+  cachedMetrics = null;
+}
+
+async function buildMetrics() {
   const redis = getRedis();
   const [detectQ, classifyQ, workerRows, jobRows, recovery] = await Promise.all([
     redis.llen(keys.queue("detect")),
@@ -66,7 +88,7 @@ export async function computeMetrics() {
               count(*) filter (where i.cache_hit)::int as cache_hits,
               count(*) filter (where i.final_category = 'failed')::int as failed
          from jobs j left join images i on i.job_id = j.id
-        group by j.id order by j.created_at desc limit 20`,
+        group by j.id order by j.created_at desc limit 10`,
     ),
     recoveryStats(),
   ]);

@@ -76,14 +76,22 @@ def main() -> None:
     log.info("%s worker ready: backend=%s, model load %.1fs, rss %.0f MB",
              stage, backend, time.perf_counter() - started, rss_mb())
 
+    from .fake import SYNTHETIC_PREFIX
+
+    def prefetch(lease: dict) -> None:
+        key = lease.get("imageKey") or ""
+        if not key.startswith(SYNTHETIC_PREFIX):  # synthetic benchmark tasks have no object
+            storage.prefetch(key)
+
     worker = Worker(
         stage=stage,
         handler=handler,
         redis_client=redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379")),
         coordinator_url=os.environ.get("COORDINATOR_URL", "http://coordinator:3000"),
-        device=os.environ.get("WORKER_DEVICE", "cpu"),
+        # device: read at register time from WORKER_DEVICE, which the model sets for DEVICE=auto.
         io_timer=io_timer,
         probe=storage.ping,  # the circuit breaker's check that MinIO is back
+        prefetch=prefetch if os.environ.get("PREFETCH", "1") != "0" else None,
     )
     worker.run()
 

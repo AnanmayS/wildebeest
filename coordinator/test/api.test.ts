@@ -71,6 +71,11 @@ class FakeWorker {
   }
 
   async claim() {
+    if (config.claimMode === "postgres") {
+      const res = await api("POST", "/tasks/claim", { workerId: this.id, stage: this.stage, max: 1, waitMs: 0 });
+      expect(res.status).toBe(200);
+      return (res.body.leases[0] ?? null) as { taskId: string; leaseEpoch: number; sha256: string; stage: string } | null;
+    }
     const id = await workerRedis.blmove(`queue:${this.stage}`, `processing:${this.id}`, "LEFT", "RIGHT", 1);
     if (!id) return null;
     const res = await api("POST", "/tasks/claim-confirm", { workerId: this.id, taskIds: [id] });

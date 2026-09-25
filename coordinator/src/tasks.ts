@@ -1,19 +1,20 @@
 import type pg from "pg";
 import { config } from "./config.js";
 import { getPool, query, tx, type Db } from "./db.js";
+import {
+  isThrottled,
+  kickDetectInBackground,
+  pushAt,
+  pushNew,
+  pushNow,
+  waitForWork,
+  finishLockThreshold,
+  type Stage,
+} from "./dispatcher.js";
 import { hub, recordEvents, type EventInput, type EventRow } from "./events.js";
 import { getRedis, keys } from "./redis.js";
 import { telemetry } from "./telemetry.js";
-import {
-  categorize,
-  enqueueClassify,
-  finalizeImage,
-  getClassification,
-  maybeFinishJob,
-  storeClassification,
-  storeDetection,
-  type Detection,
-} from "./results.js";
+import { finalizeImage, maybeFinishJob, type Detection } from "./results.js";
 
 // Task state machine (PRD 6.1):
 //
@@ -37,6 +38,11 @@ import {
 // echo it. A worker that was presumed dead (GC pause, network stall) and comes back later holds an
 // old epoch, so its late result matches zero rows → 409 STALE_LEASE, and the result from the
 // worker that took over the task is the one that stays.
+//
+// Hot path (P2, docs/decisions/p2-hotpath.md): a claim is one statement (lease + `claimed` events
+// + lease details), a completion is one statement (wb_complete in migration 006: fenced update,
+// result, finalisation, events, job check), and both can be batched: complete-batch completes
+// many tasks in one statement, and `next: k` claims the next k in the same request.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (s: unknown): s is string => typeof s === "string" && UUID_RE.test(s);
@@ -46,7 +52,7 @@ export class ValidationError extends Error {}
 export interface Lease {
   taskId: string;
   leaseEpoch: number;
-  stage: "detect" | "classify";
+  stage: Stage;
   imageKey: string;
   sha256: string;
   countryCode: string;
@@ -81,54 +87,106 @@ async function lremProcessing(workerId: string, taskIds: string[]) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * PENDING → LEASED for each ID the worker BLMOVEd. Only tasks still PENDING, of the worker's own
- * stage, and only while the worker is ALIVE, get leased; everything else is silently skipped
- * (that is what makes duplicate queue entries harmless).
+ * The one statement every claim path shares: lease the picked tasks (PENDING → LEASED, epoch + 1,
+ * only for an ALIVE worker of the task's stage), log a `claimed` event per lease, and return what
+ * the worker needs to run them. `pick` is a query yielding candidate `id`s; the guarded UPDATE
+ * decides which of them are really leased.
+ *
+ * Parameters: $1 worker, $2 lease ms, $3 default country, $4 detector model version,
+ * $5 claimed straight from Postgres (then pushed_at = eligible_at = now: there was no push step),
+ * then the pick's own parameters from $6.
+ */
+function leaseSql(pick: string) {
+  return `
+    with picked as (${pick}),
+    leased as (
+      update tasks t
+         set state = 'LEASED', lease_epoch = t.lease_epoch + 1, worker_id = $1,
+             lease_expires_at = now() + ($2::int * interval '1 millisecond'),
+             started_at = now(), queued = false,
+             pushed_at = case when $5::boolean then now() else t.pushed_at end,
+             eligible_at = case when $5::boolean then now() else t.eligible_at end
+        from picked
+       where t.id = picked.id and t.state = 'PENDING'
+         and exists (select 1 from workers w where w.id = $1 and w.status = 'ALIVE' and w.stage = t.stage)
+      returning t.id, t.lease_epoch, t.stage, t.image_id, t.enqueued_at
+    ),
+    logged as (
+      insert into task_events (task_id, worker_id, type, detail)
+      select id, $1, 'claimed', jsonb_build_object('leaseEpoch', lease_epoch) from leased
+    )
+    select l.id, l.lease_epoch, l.stage, i.sha256, i.object_key, coalesce(j.country_code, $3) as country_code,
+           d.detections
+      from leased l
+      join images i on i.id = l.image_id
+      join jobs j on j.id = i.job_id
+      left join detection_results d on l.stage = 'classify' and d.sha256 = i.sha256 and d.model_version = $4
+     order by l.enqueued_at, l.id`;
+}
+
+/** Candidates for hybrid mode: the IDs the worker (or complete+next) took from Redis. */
+const PICK_IDS = `select unnest($6::uuid[]) as id`;
+
+/**
+ * Candidates for postgres mode: retries (tasks that ran before) first, oldest first, then new work
+ * in creation order, locked with SKIP LOCKED so concurrent claimers never wait on each other.
+ * New detect work is not admitted while backpressure is on ($8). $6 stage, $7 max.
+ */
+const PICK_POSTGRES = `
+  with retries as (
+    select id from tasks
+     where state = 'PENDING' and queued = false and stage = $6 and started_at is not null
+       and (not_before is null or not_before <= now())
+     order by pending_at
+     limit $7
+     for update skip locked
+  ),
+  fresh as (
+    select id from tasks
+     where state = 'PENDING' and queued = false and stage = $6 and started_at is null and $8::boolean
+     order by enqueued_at
+     limit greatest(0, $7 - (select count(*) from retries))
+     for update skip locked
+  )
+  select id from retries union all select id from fresh`;
+
+async function lease(workerId: string, pick: string, fromPostgres: boolean, pickParams: unknown[]): Promise<Lease[]> {
+  const { rows } = await query(leaseSql(pick), [
+    workerId,
+    config.leaseMs,
+    config.defaultCountry,
+    config.detectorModelVersion,
+    fromPostgres,
+    ...pickParams,
+  ]);
+  return rows.map((r) => ({
+    taskId: r.id,
+    leaseEpoch: r.lease_epoch,
+    stage: r.stage,
+    imageKey: r.object_key,
+    sha256: r.sha256,
+    countryCode: r.country_code,
+    detections: r.stage === "classify" ? (r.detections ?? []) : null,
+  }));
+}
+
+/** Telemetry, dashboard, and (push mode) refilling queue:detect behind a detect claim. */
+function afterClaim(workerId: string, leases: Lease[]) {
+  if (leases.length === 0) return;
+  telemetry.recordClaimed(leases.map((l) => l.taskId), workerId);
+  hub.workersChanged();
+  if (config.claimMode === "hybrid" && leases.some((l) => l.stage === "detect")) kickDetectInBackground();
+}
+
+/**
+ * Hybrid mode: PENDING → LEASED for each ID the worker BLMOVEd. Only tasks still PENDING, of the
+ * worker's own stage, and only while the worker is ALIVE, get leased; everything else is silently
+ * skipped (that is what makes duplicate queue entries harmless).
  */
 export async function claimConfirm(workerId: string, taskIds: string[]): Promise<Lease[]> {
   const ids = [...new Set(taskIds.filter(isUuid))];
   if (ids.length === 0) return [];
-
-  const { leases, rows } = await tx(async (c) => {
-    const { rows: leased } = await c.query(
-      `update tasks t
-          set state = 'LEASED', lease_epoch = t.lease_epoch + 1, worker_id = $1,
-              lease_expires_at = now() + ($2::int * interval '1 millisecond'),
-              started_at = now(), queued = false
-        where t.id = any($3::uuid[]) and t.state = 'PENDING'
-          and exists (select 1 from workers w where w.id = $1 and w.status = 'ALIVE' and w.stage = t.stage)
-        returning t.id, t.lease_epoch, t.stage, t.image_id`,
-      [workerId, config.leaseMs, ids],
-    );
-    if (leased.length === 0) return { leases: [] as Lease[], rows: [] as EventRow[] };
-
-    const { rows: info } = await c.query(
-      `select i.id, i.sha256, i.object_key, coalesce(j.country_code, $2) as country_code, d.detections
-         from images i
-         join jobs j on j.id = i.job_id
-         left join detection_results d on d.sha256 = i.sha256 and d.model_version = $3
-        where i.id = any($1::uuid[])`,
-      [leased.map((r) => r.image_id), config.defaultCountry, config.detectorModelVersion],
-    );
-    const byImage = new Map(info.map((r) => [r.id, r]));
-    const leases: Lease[] = leased.map((r) => {
-      const img = byImage.get(r.image_id);
-      return {
-        taskId: r.id,
-        leaseEpoch: r.lease_epoch,
-        stage: r.stage,
-        imageKey: img.object_key,
-        sha256: img.sha256,
-        countryCode: img.country_code,
-        detections: r.stage === "classify" ? (img.detections ?? []) : null,
-      };
-    });
-    const rows = await recordEvents(
-      c,
-      leases.map((l) => ({ type: "claimed", taskId: l.taskId, workerId, detail: { leaseEpoch: l.leaseEpoch } })),
-    );
-    return { leases, rows };
-  });
+  const leases = await lease(workerId, PICK_IDS, false, [ids]);
 
   // The IDs are now either leased (tracked in Postgres) or not ours to run; either way they
   // leave the processing list. Any ID we refused that is still waiting to run goes back.
@@ -136,14 +194,14 @@ export async function claimConfirm(workerId: string, taskIds: string[]): Promise
   const leasedIds = new Set(leases.map((l) => l.taskId));
   const refused = ids.filter((id) => !leasedIds.has(id));
   if (refused.length > 0) await requeueWaiting(refused);
-
-  publish(rows, []);
-  if (leases.length > 0) {
-    telemetry.recordClaimed(leases.map((l) => l.taskId), workerId);
-    hub.workersChanged();
-  }
-  return leases;
+  afterClaim(workerId, leases);
+  return orderLike(ids, leases);
 }
+
+const orderLike = (ids: string[], leases: Lease[]) => {
+  const pos = new Map(ids.map((id, i) => [id, i]));
+  return [...leases].sort((a, b) => pos.get(a.taskId)! - pos.get(b.taskId)!);
+};
 
 /**
  * Puts back IDs whose task is PENDING and marked queued (i.e. it should be in a ready queue).
@@ -158,16 +216,76 @@ export async function requeueWaiting(taskIds: string[]): Promise<string[]> {
   );
   if (rows.length === 0) return [];
   const pipe = getRedis().pipeline();
-  for (const r of rows) pipe.lpush(keys.queue(r.stage), r.id);
+  for (const r of [...rows].reverse()) pipe.lpush(keys.queue(r.stage), r.id);
   await pipe.exec();
   return rows.map((r) => r.id as string);
+}
+
+/** Postgres mode: lease up to `max` tasks of a stage straight from the table (no Redis). */
+async function leaseFromPostgres(workerId: string, stage: Stage, max: number): Promise<Lease[]> {
+  const admitNew = stage === "classify" || !isThrottled();
+  const leases = await lease(workerId, PICK_POSTGRES, true, [stage, max, admitNew]);
+  afterClaim(workerId, leases);
+  return leases;
+}
+
+/**
+ * Claims up to `max` more tasks of `stage` for a worker, in the same request that completed its
+ * previous ones (complete-and-claim-next). Hybrid: LPOP up to max IDs from the ready queue in one
+ * atomic command and lease them; IDs we can't lease go back to the head. The coordinator is the
+ * consumer here, so the IDs skip the processing list: if this process dies between the LPOP and
+ * the lease, the rows are still PENDING and the startup rebuild re-pushes them.
+ */
+export async function claimNext(workerId: string, stage: Stage, max: number): Promise<Lease[]> {
+  const k = Math.min(Math.floor(max), config.maxClaimBatch);
+  if (!(k > 0)) return [];
+  if (config.claimMode === "postgres") return leaseFromPostgres(workerId, stage, k);
+
+  const ids = (await getRedis().lpop(keys.queue(stage), k)) ?? [];
+  if (ids.length === 0) return [];
+  let leases: Lease[];
+  try {
+    leases = await lease(workerId, PICK_IDS, false, [ids.filter(isUuid)]);
+  } catch (err) {
+    await requeueWaiting(ids).catch(() => {});
+    throw err;
+  }
+  const leasedIds = new Set(leases.map((l) => l.taskId));
+  const refused = ids.filter((id) => !leasedIds.has(id));
+  if (refused.length > 0) await requeueWaiting(refused);
+  afterClaim(workerId, leases);
+  return orderLike(ids, leases);
+}
+
+/**
+ * POST /tasks/claim (postgres mode): lease up to `max` tasks, waiting up to `waitMs` for work.
+ * The wait ends early when new work of this stage is committed (dispatcher.wake), and re-checks
+ * every 250 ms anyway (retry backoffs ending, other coordinators). `gone()` reports that the
+ * client hung up, so the caller can hand back leases nobody will run.
+ */
+export async function claimTasks(
+  workerId: string,
+  stage: Stage,
+  max: number,
+  waitMs: number,
+  gone: () => boolean = () => false,
+): Promise<Lease[]> {
+  const k = Math.max(1, Math.min(Math.floor(max) || 1, config.maxClaimBatch));
+  const deadline = Date.now() + Math.max(0, Math.min(Number(waitMs) || 0, config.claimWaitMaxMs));
+  for (;;) {
+    const leases = await leaseFromPostgres(workerId, stage, k);
+    const left = deadline - Date.now();
+    if (leases.length > 0 || left <= 0 || gone()) return leases;
+    await waitForWork(stage, Math.min(250, left));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
 // complete
 // ---------------------------------------------------------------------------------------------
 
-export type Outcome = { status: "ok" } | { status: "stale" } | { status: "not_found" };
+export type Outcome = { status: "ok"; leases?: Lease[] } | { status: "stale" } | { status: "not_found" };
+export type ItemStatus = "ok" | "stale" | "invalid" | "not_found";
 
 function num(v: unknown, what: string): number {
   const n = Number(v);
@@ -175,9 +293,9 @@ function num(v: unknown, what: string): number {
   return n;
 }
 
-function parseDetections(result: any): Detection[] {
-  if (!result || !Array.isArray(result.detections)) throw new ValidationError("result.detections must be an array");
-  return result.detections.map((d: any, i: number) => {
+function parseDetections(detections: unknown): Detection[] {
+  if (!Array.isArray(detections)) throw new ValidationError("result.detections must be an array");
+  return detections.map((d: any, i: number) => {
     if (!d || typeof d.label !== "string") throw new ValidationError(`detections[${i}].label must be a string`);
     const bbox = Array.isArray(d.bbox) ? d.bbox.map((x: unknown) => num(x, `detections[${i}].bbox`)) : [];
     return { label: d.label, conf: num(d.conf, `detections[${i}].conf`), bbox };
@@ -185,7 +303,6 @@ function parseDetections(result: any): Detection[] {
 }
 
 function parseClassification(result: any) {
-  if (!result || typeof result !== "object") throw new ValidationError("result must be an object");
   const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : null);
   return {
     label: str(result.label),
@@ -196,29 +313,14 @@ function parseClassification(result: any) {
   };
 }
 
-function checkModelVersion(stage: string, reported: unknown) {
-  const expected = stage === "detect" ? config.detectorModelVersion : config.classifierModelVersion;
-  if (reported !== undefined && reported !== expected) {
-    console.warn(`[tasks] ${stage} result reports modelVersion=${String(reported)}, storing under ${expected}`);
+let warnedVersion = false;
+function checkModelVersion(result: any) {
+  const reported = result?.modelVersion;
+  if (reported === undefined || warnedVersion) return;
+  if (reported !== config.detectorModelVersion && reported !== config.classifierModelVersion) {
+    warnedVersion = true; // once per process: a misconfigured worker would otherwise log per task
+    console.warn(`[tasks] a result reports modelVersion=${String(reported)}; stored under the coordinator's versions`);
   }
-}
-
-/** Records a rejected (fenced-off) complete/fail and tells the caller whether the task exists. */
-async function rejectStale(taskId: string, workerId: string, leaseEpoch: number, action: string): Promise<Outcome> {
-  const { rows } = await query(`select state, lease_epoch, worker_id from tasks where id = $1`, [taskId]);
-  if (rows.length === 0) return { status: "not_found" };
-  const events = await recordEvents(getPool(), [
-    {
-      type: "stale_rejected",
-      taskId,
-      workerId,
-      detail: { action, leaseEpoch, currentEpoch: rows[0].lease_epoch, state: rows[0].state, holder: rows[0].worker_id },
-    },
-  ]);
-  publish(events, []);
-  telemetry.recordStale(taskId, workerId, leaseEpoch, rows[0].lease_epoch);
-  await lremProcessing(workerId, [taskId]);
-  return { status: "stale" };
 }
 
 /** Worker-measured phase timings sent with `complete` (CONTRACTS.md "Worker protocol v2"). */
@@ -242,6 +344,42 @@ export function parseTimings(raw: unknown): WorkerTimings | null {
   return out;
 }
 
+export interface CompleteItem {
+  taskId: unknown;
+  leaseEpoch: unknown;
+  result: unknown;
+  timings?: unknown;
+}
+
+/** What wb_complete receives per item: validated in Node, so the statement never sees junk. */
+interface NormalisedItem {
+  taskId: string;
+  leaseEpoch: number;
+  detections: Detection[] | null;
+  classification: ReturnType<typeof parseClassification>;
+  timings: WorkerTimings | null;
+}
+
+/**
+ * The task's stage isn't known here (no read before the write), so both shapes are parsed: a
+ * result with a `detections` array is a DetectResult, and every result object also yields the
+ * classification fields. wb_complete marks a detect task without detections `invalid`.
+ */
+function normalise(item: CompleteItem): NormalisedItem {
+  const epoch = Number(item.leaseEpoch);
+  if (!Number.isInteger(epoch)) throw new ValidationError("leaseEpoch must be an integer");
+  const result = item.result as any;
+  if (!result || typeof result !== "object") throw new ValidationError("result must be an object");
+  checkModelVersion(result);
+  return {
+    taskId: item.taskId as string,
+    leaseEpoch: epoch,
+    detections: "detections" in result ? parseDetections(result.detections) : null,
+    classification: parseClassification(result),
+    timings: parseTimings(item.timings),
+  };
+}
+
 const ms = (d: Date | null | undefined) => (d ? new Date(d).getTime() : null);
 
 interface Timeline {
@@ -257,17 +395,11 @@ interface Timeline {
  * waterfall sample (definitions in docs/CONTRACTS.md, system.timings):
  *   ready    = became PENDING, or its retry backoff ended
  *   eligible = the dispatcher could have pushed it (not held back by the queue target/backpressure)
- *   dispatchWaitMs = pushed − eligible                   (orchestration: tick delay + push)
+ *   dispatchWaitMs = pushed − eligible                   (orchestration: push latency)
  *   queueWaitMs    = (eligible − ready) + (claimed − pushed)   (backlog in Postgres + wait in Redis)
  *   totalMs        = complete handled − ready
  */
-function timingSample(
-  stage: "detect" | "classify",
-  row: Timeline,
-  worker: WorkerTimings | null,
-  completeMs: number,
-  end: number,
-) {
+function timingSample(stage: Stage, row: Timeline, worker: WorkerTimings | null, completeMs: number, end: number) {
   const ready = Math.max(ms(row.pending_at)!, ms(row.not_before) ?? 0);
   const pushed = ms(row.pushed_at);
   const eligible = Math.min(pushed ?? Infinity, Math.max(ready, ms(row.eligible_at) ?? ready));
@@ -287,85 +419,152 @@ function timingSample(
   };
 }
 
+interface CompleteRow extends Timeline {
+  task_id: string | null;
+  status: ItemStatus | "job_done";
+  stage: Stage | null;
+  job_id: string | null;
+  finalised: boolean;
+  classify_task_id: string | null;
+  event_id: string | null;
+  event_at: Date | null;
+  event_type: string | null;
+  event_detail: Record<string, any> | null;
+}
+
+export interface BatchResult {
+  results: Array<{ taskId: string; status: ItemStatus; error?: string }>;
+  leases: Lease[];
+}
+
 /**
- * LEASED → SUCCEEDED, fenced on lease_epoch, then stores the result and moves the image forward
- * (finalise it, or create its classify task) in the same transaction.
+ * LEASED → SUCCEEDED for a batch of tasks, each fenced on its own lease_epoch, in ONE statement
+ * (wb_complete). A stale, unknown or malformed item never fails the batch: it just gets its own
+ * status. After the commit: push new classify tasks, publish events and telemetry, and, when
+ * `next` > 0, claim the worker's next tasks (complete-and-claim-next).
+ */
+export async function completeTasks(workerId: string, items: CompleteItem[], next = 0): Promise<BatchResult> {
+  const startedAt = performance.now();
+  const results = new Map<string, { status: ItemStatus; error?: string }>();
+  const valid: NormalisedItem[] = [];
+  for (const item of items) {
+    const taskId = String(item?.taskId ?? "");
+    if (!isUuid(taskId)) {
+      results.set(taskId, { status: "not_found" });
+      continue;
+    }
+    try {
+      valid.push(normalise(item));
+    } catch (err) {
+      if (!(err instanceof ValidationError)) throw err;
+      results.set(taskId, { status: "invalid", error: err.message });
+    }
+  }
+
+  let rows: CompleteRow[] = [];
+  if (valid.length > 0) {
+    ({ rows } = await query<CompleteRow>(`select * from wb_complete($1, $2::jsonb, $3, $4, $5, $6)`, [
+      workerId,
+      JSON.stringify(valid),
+      config.detectorModelVersion,
+      config.classifierModelVersion,
+      config.animalConfThreshold,
+      finishLockThreshold(),
+    ]));
+  }
+  // The coordinator's handling time of the statement, shared out over the items it completed.
+  const end = Date.now();
+  const completeMs = Math.round(((performance.now() - startedAt) / Math.max(1, valid.length)) * 10) / 10;
+
+  const timingsById = new Map(valid.map((v) => [v.taskId, v.timings]));
+  const epochById = new Map(valid.map((v) => [v.taskId, v.leaseEpoch]));
+  const events: EventRow[] = [];
+  const jobs = new Set<string>();
+  const newClassify: string[] = [];
+  let finalised = 0;
+  let stage: Stage | null = null;
+  for (const r of rows) {
+    if (r.job_id) jobs.add(r.job_id);
+    if (r.event_id !== null) {
+      events.push({
+        id: Number(r.event_id),
+        at: new Date(r.event_at!).toISOString(),
+        type: r.event_type!,
+        taskId: r.task_id,
+        workerId: r.event_type === "stale_rejected" ? workerId : null,
+        detail: r.event_detail,
+      });
+    }
+    if (r.status === "job_done") continue;
+    const taskId = r.task_id!;
+    if (r.status === "invalid") {
+      results.set(taskId, { status: "invalid", error: "result.detections must be an array" });
+      continue;
+    }
+    results.set(taskId, { status: r.status });
+    if (r.status === "stale") {
+      telemetry.recordStale(taskId, workerId, epochById.get(taskId)!, r.event_detail?.currentEpoch);
+    } else if (r.status === "ok") {
+      stage = r.stage;
+      if (r.finalised) finalised++;
+      if (r.classify_task_id) newClassify.push(r.classify_task_id);
+      telemetry.recordCompletion(timingSample(r.stage!, r, timingsById.get(taskId) ?? null, completeMs, end), taskId);
+    }
+  }
+  telemetry.recordFinalized(finalised);
+
+  if (newClassify.length > 0) {
+    // Outbox: the rows committed with queued=false; if this push is lost, the repair sweep does it.
+    await pushNew(newClassify).catch((err) => console.error(`[tasks] classify push failed: ${err.message}`));
+  }
+  publish(events, jobs);
+  hub.workersChanged();
+
+  let leases: Lease[] = [];
+  if (next > 0) {
+    stage ??= await workerStage(workerId);
+    if (stage) leases = await claimNext(workerId, stage, next);
+  }
+  return {
+    results: items.map((item) => {
+      const taskId = String(item?.taskId ?? "");
+      return { taskId, ...(results.get(taskId) ?? { status: "not_found" as const }) };
+    }),
+    leases,
+  };
+}
+
+async function workerStage(workerId: string): Promise<Stage | null> {
+  const { rows } = await query(`select stage from workers where id = $1 and status = 'ALIVE'`, [workerId]);
+  return rows[0]?.stage ?? null;
+}
+
+/**
+ * POST /tasks/:id/complete: one item through completeTasks. A malformed result is a 400
+ * (ValidationError) and keeps the lease, as before.
  */
 export async function completeTask(
   taskId: string,
   workerId: string,
-  leaseEpoch: number,
+  leaseEpoch: unknown,
   result: unknown,
   rawTimings?: unknown,
+  next = 0,
 ): Promise<Outcome> {
-  const startedAt = performance.now();
   if (!isUuid(taskId)) return { status: "not_found" };
-  const epoch = Number(leaseEpoch);
-  if (!Number.isInteger(epoch)) throw new ValidationError("leaseEpoch must be an integer");
-
-  // Validate before touching state, so a malformed body doesn't consume the lease.
-  const { rows: peek } = await query(`select stage from tasks where id = $1`, [taskId]);
-  if (peek.length === 0) return { status: "not_found" };
-  const stage: "detect" | "classify" = peek[0].stage;
-  const parsed = stage === "detect" ? parseDetections(result) : parseClassification(result);
-  checkModelVersion(stage, (result as any)?.modelVersion);
-  const timings = parseTimings(rawTimings);
-
-  const fx: Effects = { events: [], jobs: new Set() };
-  const outcome = await tx(async (c) => {
-    const { rows } = await c.query(
-      `update tasks set state = 'SUCCEEDED', finished_at = now(), lease_expires_at = null, queued = false,
-                        timings = $3
-        where id = $1 and state = 'LEASED' and lease_epoch = $2
-        returning image_id, worker_id, pending_at, not_before, eligible_at, pushed_at, started_at`,
-      [taskId, epoch, timings ? JSON.stringify(timings) : null],
-    );
-    if (rows.length === 0) return null;
-    const { image_id: imageId, worker_id: holder } = rows[0];
-    const { rows: imgs } = await c.query(`select sha256, job_id from images where id = $1`, [imageId]);
-    const { sha256, job_id: jobId } = imgs[0];
-    fx.jobs.add(jobId);
-
-    let finalised: string | null = null;
-    if (stage === "detect") {
-      const stored = await storeDetection(c, sha256, parsed as Detection[]);
-      const category = categorize(stored);
-      if (category === "animal") {
-        // Another job may already have classified this exact photo.
-        const cached = await getClassification(c, sha256);
-        if (cached) {
-          finalised = await finalizeImage(c, imageId, "animal", cached);
-        } else {
-          const classifyId = await enqueueClassify(c, imageId);
-          if (classifyId) fx.events.push({ type: "enqueued", taskId: classifyId, detail: { stage: "classify" } });
-        }
-      } else {
-        finalised = await finalizeImage(c, imageId, category);
-      }
-    } else {
-      const stored = await storeClassification(c, sha256, parsed as ReturnType<typeof parseClassification>);
-      finalised = await finalizeImage(c, imageId, "animal", stored);
-    }
-
-    await c.query(`update workers set tasks_completed = tasks_completed + 1 where id = $1`, [holder]);
-    fx.events.push({ type: "succeeded", taskId, workerId: holder, detail: { stage, leaseEpoch: epoch } });
-    if (finalised) {
-      const done = await maybeFinishJob(c, finalised);
-      if (done) fx.events.push(done);
-    }
-    return { events: await commitEffects(c, fx), timeline: rows[0], finalised: finalised !== null };
-  });
-
-  if (outcome === null) return rejectStale(taskId, workerId, epoch, "complete");
-  await lremProcessing(workerId, [taskId]);
-  publish(outcome.events, fx.jobs);
-  hub.workersChanged();
-
-  const end = Date.now();
-  const completeMs = Math.round((performance.now() - startedAt) * 10) / 10;
-  telemetry.recordCompletion(timingSample(stage, outcome.timeline, timings, completeMs, end), taskId);
-  if (outcome.finalised) telemetry.recordFinalized(1);
-  return { status: "ok" };
+  try {
+    normalise({ taskId, leaseEpoch, result, timings: rawTimings });
+  } catch (err) {
+    // Cold path only: an unknown task is a 404 whatever the body; a known one gets the 400.
+    const { rowCount } = await query(`select 1 from tasks where id = $1`, [taskId]);
+    if (!rowCount) return { status: "not_found" };
+    throw err;
+  }
+  const { results, leases } = await completeTasks(workerId, [{ taskId, leaseEpoch, result, timings: rawTimings }], next);
+  const [r] = results;
+  if (r.status === "invalid") throw new ValidationError(r.error ?? "invalid result");
+  if (r.status === "ok") return next > 0 ? { status: "ok", leases } : { status: "ok" };
+  return { status: r.status };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -378,6 +577,23 @@ interface RetriedRow {
   state: "PENDING" | "FAILED";
   attempts: number;
   image_id: string;
+}
+
+/** Records a rejected (fenced-off) fail/release and tells the caller whether the task exists. */
+async function rejectStale(taskId: string, workerId: string, leaseEpoch: number, action: string): Promise<Outcome> {
+  const { rows } = await query(`select state, lease_epoch, worker_id from tasks where id = $1`, [taskId]);
+  if (rows.length === 0) return { status: "not_found" };
+  const events = await recordEvents(getPool(), [
+    {
+      type: "stale_rejected",
+      taskId,
+      workerId,
+      detail: { action, leaseEpoch, currentEpoch: rows[0].lease_epoch, state: rows[0].state, holder: rows[0].worker_id },
+    },
+  ]);
+  publish(events, []);
+  telemetry.recordStale(taskId, workerId, leaseEpoch, rows[0].lease_epoch);
+  return { status: "stale" };
 }
 
 /**
@@ -468,13 +684,17 @@ export async function failTask(
       },
     });
     if (t.state === "FAILED") await finalizeFailed(c, [t], fx);
-    return commitEffects(c, fx);
+    return { events: await commitEffects(c, fx), retryInMs: t.state === "PENDING" ? (t.retry_in_ms ?? 0) : null };
   });
 
   if (outcome === null) return rejectStale(taskId, workerId, epoch, "fail");
-  await lremProcessing(workerId, [taskId]);
-  publish(outcome, fx.jobs);
+  publish(outcome.events, fx.jobs);
   hub.workersChanged();
+  // Re-dispatch when the backoff ends (push mode), not on whichever sweep comes after it.
+  if (outcome.retryInMs !== null) {
+    if (outcome.retryInMs <= 0) await pushNow([taskId]);
+    else pushAt(taskId, outcome.retryInMs);
+  }
   return { status: "ok" };
 }
 
@@ -501,9 +721,9 @@ export async function releaseTask(taskId: string, workerId: string, leaseEpoch: 
   });
 
   if (rows === null) return rejectStale(taskId, workerId, epoch, "release");
-  await lremProcessing(workerId, [taskId]);
   publish(rows, []);
   hub.workersChanged();
+  await pushNow([taskId]); // no backoff: it should run on a healthy worker at once
   return { status: "ok" };
 }
 
@@ -628,6 +848,7 @@ export async function releaseWorkerTasks(workerId: string, reason: string): Prom
     return commitEffects(c, fx);
   });
   publish(rows, []);
+  await pushNow(rows.map((r) => r.taskId!));
   return rows.length;
 }
 

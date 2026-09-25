@@ -16,6 +16,7 @@ import {
   makeJob,
   pullAndClaim,
   registerTestWorker,
+  hybrid,
   resetState,
   silenceWorker,
   task,
@@ -106,8 +107,8 @@ describe("docker event death watch", () => {
     await watch.idle();
 
     // The task is back at the head of the queue without any dispatcher tick.
-    expect(await task(taskId)).toMatchObject({ state: "PENDING", queued: true, attempts: 1, lease_losses: 1 });
-    expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([taskId]);
+    expect(await task(taskId)).toMatchObject({ state: "PENDING", queued: hybrid, attempts: 1, lease_losses: 1 });
+    if (hybrid) expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([taskId]);
 
     const [died] = await events("worker_died");
     expect(died.worker_id).toBe(workerId);
@@ -236,7 +237,7 @@ describe("docker event death watch", () => {
 
     expect(await workerStatus(workerId)).toBe("DEAD");
     expect(await workerStatus(running)).toBe("ALIVE");
-    expect(await task(taskId)).toMatchObject({ state: "PENDING", queued: true });
+    expect(await task(taskId)).toMatchObject({ state: "PENDING", queued: hybrid });
     const [died] = await events("worker_died");
     expect(died.detail).toMatchObject({ via: "docker_event", reconciled: true });
   });

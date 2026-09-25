@@ -15,7 +15,9 @@ import { drainProcessingList } from "./workers.js";
 //      to the head of their queue straight away.
 //   3. Processing lists of non-ALIVE workers (IDs BLMOVEd but never claim-confirmed) → back to
 //      their ready queue.
-//   4. Safety net: any running job with no unfinished images is marked done.
+//   4. Safety net: any running job with no unfinished images is marked done. Finalisations only
+//      lock the job row near the end of a job (wb_finish_job), so this sweep is what finishes a
+//      job when two "last" images raced past the lock threshold (done ≤ 1 s late).
 //
 // Self-awareness (Lifeguard): if the reaper itself was late — an event-loop stall, a slow Postgres
 // round trip — heartbeats that arrived during the stall may not have been processed either, so the
@@ -80,13 +82,13 @@ export async function drainDeadProcessingLists(): Promise<number> {
 export async function finishCompletedJobs(): Promise<number> {
   const { rows } = await query<{ id: string }>(
     `select j.id from jobs j
-      where j.status <> 'done'
+      where j.status = 'running'
         and not exists (select 1 from images i where i.job_id = j.id and i.final_category is null)`,
   );
   let finished = 0;
   for (const { id } of rows) {
     const events = await tx(async (c) => {
-      const done = await maybeFinishJob(c, id);
+      const done = await maybeFinishJob(c, id, 0); // nothing left unfinalised: lock and finish
       return done ? recordEvents(c, [done]) : [];
     });
     if (events.length > 0) {

@@ -11,7 +11,7 @@ import { dispatchOnce } from "../src/dispatcher.js";
 import { setDockerOps, killWorker } from "../src/docker.js";
 import { reapOnce } from "../src/reaper.js";
 import { getRedis, keys } from "../src/redis.js";
-import { completeTask, failTask, releaseTask, setJitterSource } from "../src/tasks.js";
+import { claimTasks, completeTask, failTask, releaseTask, setJitterSource } from "../src/tasks.js";
 import {
   detectResult,
   events,
@@ -20,6 +20,8 @@ import {
   job,
   makeJob,
   pullAndClaim,
+  postgres,
+  hybrid,
   registerTestWorker,
   resetState,
   silenceWorker,
@@ -75,8 +77,10 @@ describe("release (infrastructure errors)", () => {
     // Same epoch again: the lease is gone.
     expect((await api("POST", `/tasks/${taskId}/release`, { workerId, leaseEpoch: epoch })).status).toBe(409);
 
-    // Released work is dispatched again at once (no backoff) and to the head of the queue.
-    expect((await dispatchOnce()).retried).toBe(1);
+    // Released work is dispatched again at once (no backoff), by the release itself: it is already
+    // at the head of the queue before any dispatcher tick (P2: push after commit).
+    if (hybrid) expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([taskId]);
+    expect((await dispatchOnce()).retried).toBe(0);
     const again = (await pullAndClaim(workerId, "detect"))!;
     expect(again.leaseEpoch).toBe(epoch + 1);
   });
@@ -161,12 +165,13 @@ describe("full-jitter backoff", () => {
     expect(delay1).toBeLessThanOrEqual(config.retryBaseMs + 50);
     expect((await events("failed", taskId))[0].detail.retryInMs).toBeGreaterThan(0);
 
-    // Still backing off: the dispatcher leaves it alone.
+    // Still backing off: the dispatcher leaves it alone, and it can't be claimed.
     expect((await dispatchOnce()).retried).toBe(0);
     expect(await getRedis().llen(keys.queue("detect"))).toBe(0);
+    if (postgres) expect(await claimTasks(workerId, "detect", 1, 0)).toEqual([]);
 
     await endBackoff(taskId);
-    expect((await dispatchOnce()).retried).toBe(1);
+    expect((await dispatchOnce()).retried).toBe(hybrid ? 1 : 0);
     const l2 = (await pullAndClaim(workerId, "detect"))!;
     await failTask(taskId, workerId, l2.leaseEpoch, "flaky");
     const delay2 = new Date((await task(taskId)).not_before).getTime() - Date.now();
@@ -177,7 +182,10 @@ describe("full-jitter backoff", () => {
     setJitterSource(() => 0);
     const { workerId, taskId, epoch } = await leasedTask();
     await failTask(taskId, workerId, epoch, "flaky");
-    expect((await dispatchOnce()).retried).toBe(1);
+    // Pushed by the fail path itself (no backoff to wait for), not by the next tick.
+    if (hybrid) expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([taskId]);
+    expect((await dispatchOnce()).retried).toBe(0);
+    expect((await pullAndClaim(workerId, "detect"))?.taskId).toBe(taskId);
   });
 });
 

@@ -1,5 +1,6 @@
 import { query, tx } from "./db.js";
 import { ConflictError } from "./docker.js";
+import { pushNow } from "./dispatcher.js";
 import { hub, recordEvents } from "./events.js";
 import { presign } from "./storage.js";
 import { isUuid } from "./tasks.js";
@@ -80,5 +81,6 @@ export async function redrive(taskId: string): Promise<boolean> {
   if (!result) return false;
   hub.publishEvents(result.events);
   hub.jobChanged(result.jobId);
+  await pushNow([taskId]);
   return true;
 }

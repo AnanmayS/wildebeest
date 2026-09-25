@@ -21,7 +21,9 @@ import { computeMetrics } from "./metrics.js";
 import { systemSnapshot } from "./system.js";
 import {
   claimConfirm,
+  claimTasks,
   completeTask,
+  completeTasks,
   failTask,
   isUuid,
   releaseTask,
@@ -33,9 +35,15 @@ import { deregisterWorker, heartbeat, listWorkers, registerWorker } from "./work
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 5000 } });
 
 function sendOutcome(res: Response, outcome: Outcome) {
-  if (outcome.status === "ok") return res.json({ ok: true });
+  if (outcome.status === "ok") return res.json(outcome.leases ? { ok: true, leases: outcome.leases } : { ok: true });
   if (outcome.status === "stale") return res.status(409).json({ error: "STALE_LEASE" });
   return res.status(404).json({ error: "NOT_FOUND" });
+}
+
+/** `next` on complete: how many tasks to claim in the same request (0 = none). */
+function nextCount(v: unknown): number {
+  const n = Math.floor(Number(v ?? 0));
+  return Number.isFinite(n) && n > 0 ? Math.min(n, config.maxClaimBatch) : 0;
 }
 
 export function createApp() {
@@ -176,7 +184,8 @@ export function createApp() {
   app.post("/workers/:id/heartbeat", async (req, res) => {
     const ok = await heartbeat(req.params.id, req.body?.metrics, req.body?.taskIds);
     if (!ok) return res.status(410).json({ error: "WORKER_DEAD" });
-    res.json({ ok: true });
+    // claimMode rides along so running workers follow a coordinator restarted in the other mode.
+    res.json({ ok: true, claimMode: config.claimMode });
   });
 
   app.post("/workers/:id/deregister", async (req, res) => {
@@ -192,9 +201,44 @@ export function createApp() {
     res.json({ leases: await claimConfirm(workerId, taskIds) });
   });
 
+  // Long-poll claim (CLAIM_MODE=postgres only: in hybrid mode the ready queue is in Redis, and
+  // claiming around it would leave its IDs behind as duplicates).
+  app.post("/tasks/claim", async (req, res) => {
+    const { workerId, stage, max, waitMs } = req.body ?? {};
+    if (typeof workerId !== "string" || (stage !== "detect" && stage !== "classify")) {
+      return res.status(400).json({ error: "body must be { workerId, stage: 'detect'|'classify', max?, waitMs? }" });
+    }
+    if (config.claimMode !== "postgres") return res.status(409).json({ error: "CLAIM_MODE_HYBRID" });
+    let gone = false;
+    res.on("close", () => {
+      if (!res.writableEnded) gone = true;
+    });
+    const leases = await claimTasks(workerId, stage, Number(max ?? 1), Number(waitMs ?? 1000), () => gone);
+    if (gone) {
+      // Nobody will run these: hand them back at once (free) instead of letting the leases expire.
+      await Promise.all(leases.map((l) => releaseTask(l.taskId, workerId, l.leaseEpoch, "claim abandoned")));
+      return;
+    }
+    res.json({ leases });
+  });
+
   app.post("/tasks/:id/complete", async (req, res) => {
-    const { workerId, leaseEpoch, result, timings } = req.body ?? {};
-    sendOutcome(res, await completeTask(req.params.id, String(workerId ?? ""), leaseEpoch, result, timings));
+    const { workerId, leaseEpoch, result, timings, next } = req.body ?? {};
+    sendOutcome(
+      res,
+      await completeTask(req.params.id, String(workerId ?? ""), leaseEpoch, result, timings, nextCount(next)),
+    );
+  });
+
+  // Many completions in one statement; each item is fenced on its own epoch and one stale item
+  // never fails the batch. `next: k` claims the worker's next k tasks in the same request.
+  app.post("/tasks/complete-batch", async (req, res) => {
+    const { workerId, items, next } = req.body ?? {};
+    if (typeof workerId !== "string" || !Array.isArray(items) || items.length > 1000) {
+      return res.status(400).json({ error: "body must be { workerId, items: [≤1000 items], next? }" });
+    }
+    const out = await completeTasks(workerId, items, nextCount(next));
+    res.json({ results: out.results.map(({ taskId, status }) => ({ taskId, status: status === "not_found" ? "invalid" : status })), leases: out.leases });
   });
 
   app.post("/tasks/:id/fail", async (req, res) => {

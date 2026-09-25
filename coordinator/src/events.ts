@@ -178,6 +178,12 @@ interface ClientState {
 }
 
 const TICK_MS = 100;
+/**
+ * Job summaries and the worker list are rebuilt at most this often, however fast completions
+ * arrive: a summary counts over the job's images and the worker list joins leases, so rebuilding
+ * them every 100 ms tick under load would be most of the coordinator's read traffic.
+ */
+const REBUILD_MIN_MS = 500;
 const MAX_EVENTS_PER_MESSAGE = 200;
 const MAX_EVENT_BACKLOG = 2000;
 
@@ -190,6 +196,9 @@ class Hub {
   private latestJobId: string | null = null;
   // Per-tick caches so N clients cost one DB query, not N.
   private tickCache = new Map<string, Promise<unknown>>();
+  // Rate-limited builds (job summaries, worker list): when each was built and last changed.
+  private built = new Map<string, { at: number; value: Promise<unknown> }>();
+  private changedAt = new Map<string, number>();
 
   setBuilders(b: Builders) {
     this.builders = b;
@@ -231,10 +240,12 @@ class Hub {
 
   jobChanged(jobId: string) {
     this.latestJobId = jobId;
+    this.changedAt.set(`job:${jobId}`, Date.now());
     for (const c of this.clients) c.jobs.add(jobId);
   }
 
   workersChanged() {
+    this.changedAt.set("workers", Date.now());
     for (const c of this.clients) c.workers = true;
   }
 
@@ -260,6 +271,26 @@ class Hub {
     return p as Promise<T>;
   }
 
+  /**
+   * The latest build of `key` if nothing changed since it was made; a new build if the last one is
+   * older than REBUILD_MIN_MS; otherwise null ("too soon": the caller keeps the client's flag set
+   * and sends on a later tick, so the final state is never lost, just delayed ≤ REBUILD_MIN_MS).
+   */
+  private rateLimited<T>(key: string, make: () => Promise<T>): Promise<T> | null {
+    const now = Date.now();
+    const entry = this.built.get(key);
+    const changed = this.changedAt.get(key) ?? 0;
+    if (entry && changed < entry.at) return entry.value as Promise<T>;
+    if (entry && now - entry.at < REBUILD_MIN_MS) return null;
+    const value = make();
+    this.built.set(key, { at: now, value });
+    value.catch(() => this.built.delete(key));
+    if (this.built.size > 200) {
+      for (const [k, e] of this.built) if (now - e.at > 60_000) this.built.delete(k);
+    }
+    return value;
+  }
+
   private async nextMessage(c: ClientState): Promise<unknown | null> {
     const slots = ["events", "job", "workers", "throttle", "system"] as const;
     for (let i = 0; i < slots.length; i++) {
@@ -269,17 +300,20 @@ class Hub {
         return { type: "task_events", events: c.events.splice(0, MAX_EVENTS_PER_MESSAGE) };
       }
       if (slot === "job" && c.jobs.size > 0 && this.builders) {
-        c.cursor = (c.cursor + i + 1) % slots.length;
         const jobId = c.jobs.values().next().value as string;
+        const pending = this.rateLimited(`job:${jobId}`, () => this.builders!.jobSummary(jobId));
+        if (!pending) continue;
+        c.cursor = (c.cursor + i + 1) % slots.length;
         c.jobs.delete(jobId);
-        const job = await this.cached(`job:${jobId}`, () => this.builders!.jobSummary(jobId));
+        const job = await pending;
         return job ? { type: "job_progress", job } : null;
       }
       if (slot === "workers" && c.workers && this.builders) {
+        const pending = this.rateLimited("workers", () => this.builders!.workerList());
+        if (!pending) continue;
         c.cursor = (c.cursor + i + 1) % slots.length;
         c.workers = false;
-        const workers = await this.cached("workers", () => this.builders!.workerList());
-        return { type: "worker_update", workers };
+        return { type: "worker_update", workers: await pending };
       }
       if (slot === "throttle" && c.throttle) {
         c.cursor = (c.cursor + i + 1) % slots.length;

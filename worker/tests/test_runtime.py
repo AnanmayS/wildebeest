@@ -167,7 +167,8 @@ def test_heartbeat_reports_held_tasks_and_metrics():
     worker.run_once()
     assert seen["taskIds"] == ["t1"]
     assert seen["metrics"]["currentImageKey"] == "images/t1.jpg"
-    assert set(seen["metrics"]) == {"tasksDone", "avgLatencyMs", "rssMb", "currentImageKey"}
+    # claimBatch (P2): the coordinator sizes queue:detect from its workers' claim windows.
+    assert set(seen["metrics"]) == {"tasksDone", "avgLatencyMs", "rssMb", "currentImageKey", "claimBatch"}
 
 
 def test_worker_dead_still_reports_in_flight_result_once_then_reregisters(monkeypatch):

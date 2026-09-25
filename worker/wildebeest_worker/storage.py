@@ -1,17 +1,23 @@
 """MinIO / S3 access. Workers never share a filesystem; images and crops go through here.
 
-Two things beyond plain get/put:
+Three things beyond plain get/put:
 
 * Every call is timed into an IoTimer, so the runtime can split a task's handler time into
   fetch / infer / upload for the coordinator's overhead waterfall.
 * Failures are translated into the runtime's error vocabulary: an unreachable or overloaded
   MinIO is an InfraError (the task is fine; release it and back off), while bytes that don't
   decode or an object that doesn't exist are NonRetryableErrors (retrying can't help).
+* prefetch(key) downloads and decodes an image on a background thread while the current task
+  runs; the next get_image(key) takes the prefetched result (or its error) and counts only
+  the time it still had to wait as fetchMs.
 """
 
 import io
 import os
+import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import PIL.Image
 import PIL.ImageFile
@@ -86,6 +92,9 @@ class Storage:
         from botocore.config import Config
 
         self.timer = timer or IoTimer()
+        self._prefetched: OrderedDict[str, Future] = OrderedDict()
+        self._prefetch_lock = threading.Lock()
+        self._pool: ThreadPoolExecutor | None = None
         self.bucket = os.environ.get("S3_BUCKET", "wildebeest")
         self.s3 = boto3.client(
             "s3",
@@ -102,15 +111,37 @@ class Storage:
             ),
         )
 
-    def get_image(self, key: str) -> PIL.Image.Image:
-        """Download and decode; the time counts as fetchMs."""
-        started = time.perf_counter()
+    # Decoded images kept for a later get_image: the one being prefetched and at most one more
+    # (a decoded 2048×1536 photo is ~9 MB). Older entries, e.g. for a lease we released, drop out.
+    MAX_PREFETCHED = 2
+
+    def _download(self, key: str) -> PIL.Image.Image:
         try:
-            try:
-                data = self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
-            except Exception as e:
-                raise translate_s3_error(e, key) from e
-            return open_rgb(data)
+            data = self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        except Exception as e:
+            raise translate_s3_error(e, key) from e
+        return open_rgb(data)
+
+    def prefetch(self, key: str) -> None:
+        """Start downloading + decoding `key` in the background (at most one at a time)."""
+        with self._prefetch_lock:
+            if key in self._prefetched:
+                return
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prefetch")
+            self._prefetched[key] = self._pool.submit(self._download, key)
+            while len(self._prefetched) > self.MAX_PREFETCHED:
+                self._prefetched.popitem(last=False)[1].cancel()
+
+    def get_image(self, key: str) -> PIL.Image.Image:
+        """Download and decode (or take the prefetched image); the time waited counts as fetchMs."""
+        started = time.perf_counter()
+        with self._prefetch_lock:
+            pending: Future | None = self._prefetched.pop(key, None)
+        try:
+            if pending is not None and not pending.cancelled():
+                return pending.result()  # re-raises the download's own (translated) error
+            return self._download(key)
         finally:
             self.timer.fetch_ms += (time.perf_counter() - started) * 1000
 

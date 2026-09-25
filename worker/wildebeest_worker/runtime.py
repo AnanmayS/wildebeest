@@ -1,16 +1,22 @@
 """Worker runtime shared by both stages: register, heartbeat, claim, process, report.
 
 Lifecycle
-  1. POST /workers/register -> workerId + config (heartbeatMs, leaseMs, claimBatchSize).
-  2. A heartbeat thread POSTs /workers/{id}/heartbeat every heartbeatMs with the task
-     IDs we hold, which renews their leases. A 410 WORKER_DEAD means the coordinator
-     already gave our tasks to someone else: drop in-flight work and re-register.
-  3. Claim loop: BLMOVE queue:{stage} -> processing:{workerId} (reliable queue, so an
-     ID is never only in our memory), POST /tasks/claim-confirm to get leases with
-     fencing tokens (leaseEpoch), run the model, POST /tasks/{id}/complete with the
-     result and the task's phase timings. 409 STALE_LEASE on complete means our lease
-     was taken over: discard and move on.
-  4. SIGTERM: stop claiming, finish the in-flight task, deregister, exit.
+  1. POST /workers/register -> workerId + config (heartbeatMs, leaseMs, claimMode, claim batch
+     floor/cap).
+  2. A heartbeat thread POSTs /workers/{id}/heartbeat every heartbeatMs with every task ID we
+     hold (running, waiting, or finished but not yet reported), which renews their leases. A 410
+     WORKER_DEAD means the coordinator already gave our tasks to someone else: drop in-flight
+     work and re-register.
+  3. Claim: hybrid mode moves up to k IDs from queue:{stage} to processing:{workerId} in one
+     MULTI/EXEC (reliable queue: an ID is never only in our memory), then POST
+     /tasks/claim-confirm for leases with fencing tokens (leaseEpoch). Postgres mode long-polls
+     POST /tasks/claim instead. k ≈ round trip ÷ service time, measured online (ClaimSizer).
+  4. Process the held leases in order. With prefetch, the next image downloads while the
+     current one runs. Results are buffered and reported in one request (complete, or
+     complete-batch for several) that also asks for the next leases (`next`), so a busy
+     worker makes one coordinator round trip per batch, not two per task. 409 STALE_LEASE
+     (or status "stale" in a batch) means our lease was taken over: discard and move on.
+  5. SIGTERM / stop(): stop claiming, finish the in-flight task, report, deregister, exit.
      SIGKILL needs nothing here; the coordinator's death watch / reaper recovers.
 
 Errors are classified before they are reported (classify_error):
@@ -23,6 +29,7 @@ Errors are classified before they are reported (classify_error):
 """
 
 import logging
+import math
 import os
 import random
 import resource
@@ -31,6 +38,8 @@ import socket
 import sys
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Callable
 
 import requests
@@ -163,6 +172,46 @@ class CircuitBreaker:
         return True
 
 
+class ClaimSizer:
+    """Claim batch size k ≈ round trip ÷ service time (RabbitMQ's prefetch rule), measured online.
+
+    A synchronous worker pays one coordinator round trip per claim/complete exchange, so with k
+    tasks per exchange the orchestration cost per task is RTT / k. Choosing k = ceil(RTT / service)
+    keeps that at or below one service time; for real models (RTT ~5 ms, service ~700 ms) it gives
+    k = 1, for 0 ms fake tasks it runs to the cap. Both inputs are EWMAs; k stays at the floor until
+    both have been measured, and floor == cap pins it.
+    """
+
+    def __init__(self, alpha: float = 0.2) -> None:
+        self.alpha = alpha
+        self.rtt_ms: float | None = None
+        self.service_ms: float | None = None
+
+    def _ewma(self, old: float | None, new: float) -> float:
+        return new if old is None else old + self.alpha * (new - old)
+
+    def observe_rtt(self, ms: float) -> None:
+        self.rtt_ms = self._ewma(self.rtt_ms, max(0.0, ms))
+
+    def observe_service(self, ms: float) -> None:
+        self.service_ms = self._ewma(self.service_ms, max(0.0, ms))
+
+    def size(self, floor: int, cap: int) -> int:
+        floor = max(1, floor)
+        if cap <= floor or self.rtt_ms is None or self.service_ms is None:
+            return floor
+        return max(floor, min(cap, math.ceil(self.rtt_ms / max(self.service_ms, 0.05))))
+
+
+@dataclass
+class Finished:
+    """A completed task whose result waits in the batch buffer (its lease is still held)."""
+
+    item: dict
+    latency_ms: float
+    at: float  # monotonic time it finished
+
+
 class Worker:
     def __init__(
         self,
@@ -177,38 +226,76 @@ class Worker:
         device: str | None = None,
         io_timer=None,
         probe: Callable[[], None] | None = None,
+        prefetch: Callable[[dict], None] | None = None,
+        container_id: str | None = None,
     ) -> None:
         self.stage = stage
         self.handler = handler
         self.redis = redis_client
         self.base_url = coordinator_url.rstrip("/")
         self.http = http or requests.Session()
-        self.hostname = hostname or socket.gethostname()
+        # Worker IDs are {stage}-{hostname}; WORKER_HOSTNAME lets two native workers share a host.
+        self.hostname = hostname or os.environ.get("WORKER_HOSTNAME") or socket.gethostname()
         self.startup_timeout_s = startup_timeout_s
         self.runtime = runtime or detect_runtime()
-        self.device = device or os.environ.get("WORKER_DEVICE", "cpu")
+        self._device = device
         # Inside Docker the hostname is the short container ID; a native worker has no container.
-        self.container_id = self.hostname if self.runtime == "container" else f"native-{self.hostname}"
+        self.container_id = (container_id or os.environ.get("WORKER_CONTAINER_ID")
+                             or (self.hostname if self.runtime == "container" else f"native-{self.hostname}"))
         self.io = io_timer  # anything with fetch_ms / upload_ms / reset(); see storage.IoTimer
         self.breaker = CircuitBreaker(probe)
+        # Depth-1 prefetch: download/decode the next leased image while the current one runs.
+        self.prefetch = prefetch
+        self.prefetch_depth = int(os.environ.get("PREFETCH", "1")) if prefetch else 0
 
         self.worker_id: str | None = None
         self.heartbeat_s = int(os.environ.get("HEARTBEAT_MS", "2000")) / 1000
         self.lease_s = int(os.environ.get("LEASE_MS", "15000")) / 1000
-        self.batch_size = int(os.environ.get("CLAIM_BATCH_SIZE", "1"))
+        self.claim_mode = "hybrid"
+        self.batch_size = int(os.environ.get("CLAIM_BATCH_SIZE", "1"))  # floor of the adaptive batch
+        self.max_batch = self.batch_size  # cap; the coordinator sends maxClaimBatch at register
+        self.sizer = ClaimSizer()
+        # Results are buffered and sent as one complete-batch: flushed after COMPLETE_BATCH tasks
+        # (0 = auto: the current claim batch), after COMPLETE_FLUSH_MS, or when we run out of work.
+        self.complete_batch = int(os.environ.get("COMPLETE_BATCH", "0"))
+        self.flush_s = int(os.environ.get("COMPLETE_FLUSH_MS", "50")) / 1000
 
-        self.stopping = threading.Event()  # set by SIGTERM/SIGINT
+        self.stopping = threading.Event()  # set by SIGTERM/SIGINT or stop()
         self.dead = threading.Event()  # set by the heartbeat thread on 410
         self.lock = threading.Lock()  # guards the fields below
-        self.held_task_ids: list[str] = []  # everything we hold a lease on
+        self.backlog: deque[tuple[dict, float]] = deque()  # leased, not started: (lease, claimMs)
+        self.current: dict | None = None  # the lease being processed
+        self.finished: list[Finished] = []  # done, result not yet accepted by the coordinator
         self.current_image_key: str | None = None
         self.tasks_done = 0
         self.total_latency_ms = 0.0
 
+    @property
+    def device(self) -> str:
+        # Read late: with DEVICE=auto the model sets WORKER_DEVICE while it loads.
+        return self._device or os.environ.get("WORKER_DEVICE", "cpu")
+
+    @property
+    def held_task_ids(self) -> list[str]:
+        """Every task we hold a lease on: the one running, the ones waiting, the unreported ones."""
+        with self.lock:
+            ids = [self.current["taskId"]] if self.current else []
+            ids += [lease["taskId"] for lease, _ in self.backlog]
+            ids += [f.item["taskId"] for f in self.finished]
+        return ids
+
+    def claim_batch(self) -> int:
+        """k: tasks per claim (≈ RTT ÷ service time, between the coordinator's floor and cap)."""
+        return self.sizer.size(self.batch_size, self.max_batch)
+
+    def window(self) -> int:
+        """Leases to hold: a claim batch, and with prefetch at least one beyond the running task."""
+        return max(self.claim_batch(), 1 + self.prefetch_depth)
+
     # ---------------------------------------------------------------- HTTP
 
     def _post(self, path: str, body: dict, attempts: int = 5, budget_s: float | None = None,
-              abort: threading.Event | None = None) -> requests.Response:
+              abort: threading.Event | None = None, timeout: float = 10) -> requests.Response:
         """POST, retrying connection errors, timeouts and 502/503/504 with full-jitter backoff.
 
         Gives up after `attempts` tries, or, when `budget_s` is set, once that much time has
@@ -222,7 +309,7 @@ class Worker:
             attempt += 1
             failure: Exception | None = None
             try:
-                resp = self.http.post(f"{self.base_url}{path}", json=body, timeout=10)
+                resp = self.http.post(f"{self.base_url}{path}", json=body, timeout=timeout)
                 if resp.status_code not in RETRY_STATUSES:
                     return resp
             except (requests.ConnectionError, requests.Timeout) as e:
@@ -266,9 +353,15 @@ class Worker:
         self.heartbeat_s = config.get("heartbeatMs", self.heartbeat_s * 1000) / 1000
         self.lease_s = config.get("leaseMs", self.lease_s * 1000) / 1000
         self.batch_size = int(config.get("claimBatchSize", self.batch_size))
+        self.max_batch = int(config.get("maxClaimBatch", self.batch_size))
+        self.claim_mode = config.get("claimMode", "hybrid")
+        with self.lock:  # a new incarnation holds nothing: the old one's leases were released
+            self.backlog.clear()
+            self.finished.clear()
         self.dead.clear()
-        log.info("registered as %s (%s/%s, batch=%d, heartbeat=%.1fs)",
-                 self.worker_id, self.runtime, self.device, self.batch_size, self.heartbeat_s)
+        log.info("registered as %s (%s/%s, %s claims, batch %d..%d, prefetch %d, heartbeat %.1fs)",
+                 self.worker_id, self.runtime, self.device, self.claim_mode, self.batch_size, self.max_batch,
+                 self.prefetch_depth, self.heartbeat_s)
 
     def deregister(self) -> None:
         try:
@@ -278,22 +371,32 @@ class Worker:
             log.warning("deregister failed: %s", e)
 
     def heartbeat_once(self) -> None:
+        held = self.held_task_ids
         with self.lock:
             body = {
-                "taskIds": list(self.held_task_ids),
+                "taskIds": held,
                 "metrics": {
                     "tasksDone": self.tasks_done,
                     "avgLatencyMs": round(self.total_latency_ms / self.tasks_done) if self.tasks_done else 0,
                     "rssMb": rss_mb(),
                     "currentImageKey": self.current_image_key,
+                    # The coordinator sizes queue:detect from its workers' claim windows.
+                    "claimBatch": self.window(),
                 },
             }
-        resp = self._post(f"/workers/{self.worker_id}/heartbeat", body, attempts=1)
+        # Two tries: one immediate retry covers a stale pooled connection (seen through Docker
+        # Desktop's port forwarding), which would otherwise cost a whole heartbeat interval.
+        resp = self._post(f"/workers/{self.worker_id}/heartbeat", body, attempts=2)
         if resp.status_code == 410:
             log.warning("coordinator says %s is dead; dropping in-flight work", self.worker_id)
             self.dead.set()
         elif not resp.ok:
             log.warning("heartbeat got HTTP %d", resp.status_code)
+        else:
+            mode = resp.json().get("claimMode")
+            if mode in ("hybrid", "postgres") and mode != self.claim_mode:
+                log.info("coordinator switched to %s claims", mode)
+                self.claim_mode = mode  # read by the main loop on its next claim
 
     def _heartbeat_loop(self) -> None:
         while not self.stopping.is_set():
@@ -304,21 +407,29 @@ class Worker:
                     log.warning("heartbeat failed: %s", e)
             self.stopping.wait(self.heartbeat_s)
 
-    # ---------------------------------------------------------------- tasks
+    # ---------------------------------------------------------------- claiming
 
-    def claim_ids(self) -> list[str]:
-        """Move up to batch_size IDs from the ready queue into our processing list."""
+    def claim_ids(self, k: int | None = None) -> list[str]:
+        """Hybrid mode: move up to k IDs from the ready queue into our processing list.
+
+        One MULTI/EXEC round trip moves up to k at once (atomic, like a Lua script, but needs no
+        scripting engine); only an empty queue costs a second, blocking BLMOVE (≤ 1 s) for the first.
+        """
+        k = k or self.window()
         src, dst = f"queue:{self.stage}", f"processing:{self.worker_id}"
-        first = self.redis.blmove(src, dst, 1, "LEFT", "RIGHT")
-        if first is None:
-            return []
-        ids = [first]
-        while len(ids) < self.batch_size:
-            nxt = self.redis.blmove(src, dst, 0.05, "LEFT", "RIGHT")  # don't wait for a full batch
-            if nxt is None:
-                break
-            ids.append(nxt)
+        ids = self._move(src, dst, k)
+        if not ids:
+            first = self.redis.blmove(src, dst, 1, "LEFT", "RIGHT")
+            if first is None:
+                return []
+            ids = [first] + (self._move(src, dst, k - 1) if k > 1 else [])
         return [i.decode() if isinstance(i, bytes) else i for i in ids]
+
+    def _move(self, src: str, dst: str, k: int) -> list:
+        pipe = self.redis.pipeline(transaction=True)
+        for _ in range(k):
+            pipe.lmove(src, dst, "LEFT", "RIGHT")
+        return [i for i in pipe.execute() if i is not None]
 
     def confirm(self, task_ids: list[str]) -> list[dict]:
         resp = self._post("/tasks/claim-confirm", {"workerId": self.worker_id, "taskIds": task_ids})
@@ -326,6 +437,39 @@ class Worker:
             raise WorkerDead()
         resp.raise_for_status()
         return resp.json().get("leases", [])
+
+    def claim_postgres(self, k: int, wait_ms: int = 1000) -> list[dict]:
+        """Postgres mode: one long-poll; the coordinator leases up to k with SKIP LOCKED."""
+        resp = self._post("/tasks/claim", {"workerId": self.worker_id, "stage": self.stage, "max": k,
+                                           "waitMs": wait_ms}, timeout=10 + wait_ms / 1000)
+        resp.raise_for_status()
+        return resp.json().get("leases", [])
+
+    def acquire(self) -> int:
+        """Fill the backlog with a fresh claim; returns how many leases we got."""
+        k = self.window()
+        started = time.perf_counter()
+        if self.claim_mode == "postgres":
+            leases = self.claim_postgres(k)
+        else:
+            task_ids = self.claim_ids(k)
+            if not task_ids:
+                return 0
+            started = time.perf_counter()  # the blocking wait for work isn't claim overhead
+            leases = self.confirm(task_ids)
+        self._add_leases(leases, (time.perf_counter() - started) * 1000)
+        return len(leases)
+
+    def _add_leases(self, leases: list[dict], request_ms: float) -> None:
+        """Queue leases locally; each is charged its share of the request that delivered it."""
+        if not leases:
+            return
+        self.sizer.observe_rtt(request_ms)
+        share = request_ms / len(leases)
+        with self.lock:
+            self.backlog.extend((lease, share) for lease in leases)
+
+    # ---------------------------------------------------------------- reporting
 
     def release(self, lease: dict, reason: str) -> None:
         """Give a lease back without spending an attempt (infrastructure trouble, not the task's)."""
@@ -344,8 +488,77 @@ class Worker:
         if resp.status_code == 409:
             log.info("fail for %s rejected: STALE_LEASE", task_id)
 
-    def process(self, lease: dict, claim_ms: float = 0.0) -> None:
-        task_id, epoch = lease["taskId"], lease["leaseEpoch"]
+    def _flush_due(self) -> bool:
+        with self.lock:
+            if not self.finished:
+                return False
+            n = self.complete_batch or self.claim_batch()
+            return (not self.backlog or len(self.finished) >= n
+                    or time.monotonic() - self.finished[0].at >= self.flush_s)
+
+    def flush(self) -> None:
+        """Report buffered results: one complete (or complete-batch) request, asking for the next
+        leases in the same request (`next`) so the backlog refills without a separate claim.
+
+        Even if the coordinator declared us dead meanwhile (a pause, a partition), the results are
+        posted: the lease epoch decides. A task that was reassigned is answered STALE_LEASE and
+        recorded, which is the fencing we want to be visible. A zombie gets a single try and asks
+        for nothing; a live worker retries for up to a lease length.
+        """
+        with self.lock:
+            batch = list(self.finished)
+            want = self.window() - len(self.backlog) - (1 if self.current else 0)
+        if not batch:
+            return
+        zombie = self.dead.is_set()
+        refill = 0 if (zombie or self.stopping.is_set() or self.breaker.is_open) else max(0, want)
+        if len(batch) == 1:
+            path = f"/tasks/{batch[0].item['taskId']}/complete"
+            body = {"workerId": self.worker_id, **{k: v for k, v in batch[0].item.items() if k != "taskId"}}
+        else:
+            path = "/tasks/complete-batch"
+            body = {"workerId": self.worker_id, "items": [f.item for f in batch]}
+        if refill:
+            body["next"] = refill
+
+        started = time.perf_counter()
+        try:
+            resp = self._post(path, body, attempts=1) if zombie else self._report(path, body)
+        finally:
+            with self.lock:  # sent (or given up on): these leases are no longer ours to renew
+                del self.finished[:len(batch)]
+        request_ms = (time.perf_counter() - started) * 1000
+
+        if len(batch) == 1:
+            if resp.status_code == 409:
+                statuses = ["stale"]
+            else:
+                resp.raise_for_status()
+                statuses = ["ok"]
+        else:
+            resp.raise_for_status()
+            by_id = {r["taskId"]: r["status"] for r in resp.json().get("results", [])}
+            statuses = [by_id.get(f.item["taskId"], "invalid") for f in batch]
+
+        for f, status in zip(batch, statuses):
+            if status == "ok":
+                with self.lock:
+                    self.tasks_done += 1
+                    self.total_latency_ms += f.latency_ms
+                log.debug("task %s done in %.0f ms", f.item["taskId"], f.latency_ms)
+            else:
+                log.warning("result for %s discarded: %s (epoch %s)", f.item["taskId"],
+                            "STALE_LEASE" if status == "stale" else status, f.item["leaseEpoch"])
+        leases = resp.json().get("leases", []) if resp.ok else []
+        if leases and not (self.dead.is_set() or self.stopping.is_set()):
+            self._add_leases(leases, request_ms)
+        elif refill:
+            self.sizer.observe_rtt(request_ms)
+
+    # ---------------------------------------------------------------- running tasks
+
+    def execute(self, lease: dict, claim_ms: float = 0.0) -> None:
+        """Run one task. A result joins the report buffer; an error is reported at once."""
         with self.lock:
             self.current_image_key = lease.get("imageKey")
         if self.io is not None:
@@ -361,26 +574,16 @@ class Worker:
                 self.current_image_key = None
 
         latency_ms = (time.perf_counter() - started) * 1000
-        # Even if the coordinator declared us dead meanwhile (a pause, a partition), report the
-        # result: the lease epoch decides. If the task was reassigned, the coordinator answers 409
-        # STALE_LEASE and records the rejection, which is the fencing we want to be visible. A
-        # zombie gets a single try; a live worker retries for up to a lease length.
+        self.sizer.observe_service(latency_ms)
         result["latencyMs"] = round(latency_ms)
-        path = f"/tasks/{task_id}/complete"
-        body = {"workerId": self.worker_id, "leaseEpoch": epoch, "result": result,
+        item = {"taskId": lease["taskId"], "leaseEpoch": lease["leaseEpoch"], "result": result,
                 "timings": self._timings(claim_ms, latency_ms)}
-        resp = self._post(path, body, attempts=1) if self.dead.is_set() else self._report(path, body)
-        if resp.status_code == 409:
-            log.warning("result for %s discarded: STALE_LEASE (epoch %s was superseded)", task_id, epoch)
-            return
-        resp.raise_for_status()
         with self.lock:
-            self.tasks_done += 1
-            self.total_latency_ms += latency_ms
-        log.info("task %s done in %.0f ms", task_id, latency_ms)
+            self.finished.append(Finished(item, latency_ms, time.monotonic()))
 
     def _timings(self, claim_ms: float, handler_ms: float) -> dict:
-        """claim RTT, then the handler split into storage reads, storage writes and the rest."""
+        """claim RTT share, then the handler split into storage reads, storage writes and the rest.
+        With prefetch, fetchMs is only the part of the download the task actually waited for."""
         fetch = self.io.fetch_ms if self.io is not None else 0.0
         upload = self.io.upload_ms if self.io is not None else 0.0
         return {
@@ -408,32 +611,59 @@ class Worker:
             log.exception("task %s failed", task_id)
             self.fail(lease, message)
 
-    def run_once(self) -> int:
-        """One claim/process round. Returns how many leases were processed."""
-        task_ids = self.claim_ids()
-        if not task_ids:
-            return 0
-        started = time.perf_counter()
-        leases = self.confirm(task_ids)
-        claim_ms = (time.perf_counter() - started) * 1000
+    def _prefetch_next(self) -> None:
+        """Start downloading the next leased image while the current one runs (read-only, so it
+        can't break fencing: a lease we lose meanwhile just wastes the download)."""
+        if not self.prefetch:
+            return
         with self.lock:
-            self.held_task_ids = [l["taskId"] for l in leases]
+            nxt = self.backlog[0][0] if self.backlog else None
+        if nxt is not None:
+            try:
+                self.prefetch(nxt)
+            except Exception as e:  # an optimisation must never cost a task
+                log.debug("prefetch of %s failed: %s", nxt.get("imageKey"), e)
+
+    def run_once(self) -> int:
+        """Claim if we hold nothing, then work through the held leases, reporting as we go.
+        Leases that arrive with a report (complete + next) are processed in the same call.
+        Returns how many leases were taken off the backlog (processed or released)."""
+        with self.lock:
+            empty = not self.backlog
+        if empty and self.acquire() == 0:
+            return 0
+        taken = 0
         try:
-            for lease in leases:
-                if self.stopping.is_set() or self.dead.is_set():
-                    break  # unstarted leases go back to PENDING via deregister / the reaper
+            while not (self.stopping.is_set() or self.dead.is_set()):
+                with self.lock:
+                    if not self.backlog:
+                        break
+                    lease, claim_ms = self.backlog.popleft()
+                    self.current = lease
+                taken += 1
                 if self.breaker.is_open:
                     # A dependency went down mid-batch: hand the rest back now instead of
                     # letting their leases expire (which would cost them an attempt).
                     self.release(lease, f"circuit open: {self.breaker.open_reason}")
                 else:
-                    self.process(lease, claim_ms)
+                    self._prefetch_next()
+                    self.execute(lease, claim_ms)
                 with self.lock:
-                    self.held_task_ids.remove(lease["taskId"])
+                    self.current = None
+                if self._flush_due():
+                    self.flush()
+            self.flush()  # stopping, dead, or out of work: report what we have (a zombie once)
+        except Exception:
+            with self.lock:
+                self.finished.clear()  # unsendable: those leases expire and the tasks rerun
+            raise
         finally:
             with self.lock:
-                self.held_task_ids = []
-        return len(leases)
+                self.current = None
+                if self.stopping.is_set() or self.dead.is_set():
+                    # Unstarted leases: deregister (or the reaper, or re-registration) returns them.
+                    self.backlog.clear()
+        return taken
 
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self._on_signal)
@@ -444,12 +674,16 @@ class Worker:
         self.deregister()
         log.info("worker %s exited cleanly", self.worker_id)
 
+    def stop(self) -> None:
+        """Finish the in-flight task, report, deregister and return from run()."""
+        self.stopping.set()
+
     def loop(self) -> None:
-        """Claim and process until SIGTERM."""
+        """Claim and process until stopped."""
         while not self.stopping.is_set():
             try:
                 if self.dead.is_set():
-                    self.register()  # new workerId; the old one's leases were reassigned
+                    self.register()  # same workerId; the old incarnation's leases were reassigned
                     continue
                 if self.breaker.is_open:
                     self.breaker.wait_and_probe(self.stopping)  # claim nothing until it closes
@@ -466,4 +700,4 @@ class Worker:
 
     def _on_signal(self, signum, _frame) -> None:
         log.info("received %s: finishing in-flight task, then exiting", signal.Signals(signum).name)
-        self.stopping.set()
+        self.stop()

@@ -1,5 +1,7 @@
 import { closePool, migrate, query } from "../src/db.js";
-import { resetDispatcherState } from "../src/dispatcher.js";
+import { dispatchIdle, resetDispatcherState } from "../src/dispatcher.js";
+import { config } from "../src/config.js";
+import { resetMetricsCache } from "../src/metrics.js";
 import { setDockerOps } from "../src/docker.js";
 import { resetInvariants } from "../src/invariants.js";
 import { resetSystemSnapshot } from "../src/system.js";
@@ -8,10 +10,15 @@ import { telemetry } from "../src/telemetry.js";
 import { createJob, sha256Of, type ImageInput } from "../src/jobs.js";
 import { closeRedis, getRedis, keys } from "../src/redis.js";
 import { ensureBucket } from "../src/storage.js";
-import { claimConfirm, type Lease } from "../src/tasks.js";
+import { claimConfirm, claimTasks, type Lease } from "../src/tasks.js";
 import { registerWorker } from "../src/workers.js";
 
 let ready = false;
+
+/** The claim mode this run tests (`npm test` runs the whole suite once per mode). */
+export const CLAIM_MODE = config.claimMode;
+export const hybrid = CLAIM_MODE === "hybrid";
+export const postgres = CLAIM_MODE === "postgres";
 
 /** Migrates the test DB (first call only), then wipes all rows and the test Redis DB. */
 export async function resetState() {
@@ -23,8 +30,13 @@ export async function resetState() {
   await query(
     `truncate jobs, images, tasks, detection_results, classification_results, workers, task_events restart identity cascade`,
   );
+  await dispatchIdle();
   await getRedis().flushdb();
+  await getRedis().set(keys.queuesBuilt, new Date().toISOString()); // as startup leaves it
   resetDispatcherState();
+  resetMetricsCache();
+  config.claimMode = CLAIM_MODE;
+  config.dispatchMode = "push";
   telemetry.reset();
   resetInvariants();
   resetSystemSnapshot();
@@ -67,11 +79,21 @@ export async function eventually<T>(fn: () => Promise<T> | T, timeoutMs = 3000):
   }
 }
 
-/** What a real worker does: move one ID from the ready queue to its processing list, then confirm. */
+/**
+ * What a real worker does to get one task. Hybrid: move one ID from the ready queue to its
+ * processing list, then confirm. Postgres: one claim straight from the table, no waiting. Then
+ * lets any background queue refill the claim triggered finish, so tests see a settled state.
+ */
 export async function pullAndClaim(workerId: string, stage: "detect" | "classify"): Promise<Lease | null> {
-  const id = await getRedis().lmove(keys.queue(stage), keys.processing(workerId), "LEFT", "RIGHT");
-  if (!id) return null;
-  const leases = await claimConfirm(workerId, [id]);
+  let leases: Lease[];
+  if (config.claimMode === "postgres") {
+    leases = await claimTasks(workerId, stage, 1, 0);
+  } else {
+    const id = await getRedis().lmove(keys.queue(stage), keys.processing(workerId), "LEFT", "RIGHT");
+    if (!id) return null;
+    leases = await claimConfirm(workerId, [id]);
+  }
+  await dispatchIdle();
   return leases[0] ?? null;
 }
 

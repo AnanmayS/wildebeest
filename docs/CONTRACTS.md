@@ -385,3 +385,71 @@ open and add a few fields the dashboard asked for.
   `stuckLeases` = LEASED tasks on a non-ALIVE worker silent for more than `WORKER_TIMEOUT_MS` + 2 reaper ticks, or
   whose lease expired more than 2 ticks ago; `lostImages` = unfinished images of running jobs with no PENDING/LEASED
   task. Checked every 5 s.
+
+## P2 refinements (hot path, 2026-09-25)
+
+Worker-protocol details pinned down by the P2 work (docs/decisions/p2-hotpath.md). Every dashboard-facing shape
+above is unchanged.
+
+**Register and heartbeat**
+
+- `POST /workers/register` → `config` gains `"maxClaimBatch": 16` and `"claimMode": "hybrid" | "postgres"`.
+  `claimBatchSize` is now the *floor* of the claim batch: workers size it online, k = ceil(RTT ÷ service time)
+  between `claimBatchSize` and `maxClaimBatch` (coordinator env `CLAIM_BATCH_SIZE`, `MAX_CLAIM_BATCH`; equal
+  values pin it).
+- Heartbeat `metrics` gains `"claimBatch"`: the number of leases the worker aims to hold (claim batch, and at least
+  2 with prefetch). The coordinator sizes `queue:detect` from it. The 200 response is
+  `{ "ok": true, "claimMode": "hybrid" }` so running workers follow a coordinator restarted in the other mode.
+- Heartbeat `taskIds` = every task the worker holds a lease on: running, prefetched/waiting, and finished but
+  not yet reported. A heartbeat with no `taskIds` doesn't touch `tasks`; renewal skips rows a completion holds
+  at that instant (SKIP LOCKED) and renews them on the next beat.
+- Workers read `WORKER_CONTAINER_ID` (register `containerId`), `WORKER_HOSTNAME` (worker ID = `{stage}-{hostname}`)
+  and `WORKER_DEVICE` at register time, after the model has loaded. A heartbeat is retried once on a connection
+  error.
+
+**Claiming (hybrid)**
+
+- A worker moves up to k IDs with one `MULTI`/`EXEC` of k `LMOVE queue:{stage} processing:{workerId} LEFT RIGHT`
+  (atomic, one round trip); only when that finds nothing does it block in `BLMOVE … 1` for the first ID. This
+  replaces "Workers only ever do BLMOVE": workers do BLMOVE and LMOVE, nothing else.
+- For complete-and-claim-next the coordinator itself takes the IDs with `LPOP queue:{stage} k` and leases them in
+  the same request; those IDs never enter a processing list. IDs it can't lease go back to the head.
+- `claim-confirm` removes the IDs from `processing:{workerId}`. complete/fail/release no longer `LREM` (the ID
+  left the processing list at claim-confirm; the old LREM was always a no-op).
+
+**Claiming (`CLAIM_MODE=postgres`)**
+
+- `POST /tasks/claim` `{ workerId, stage, max, waitMs }` → `{ leases }`. `max` is clamped to 1..`maxClaimBatch`,
+  `waitMs` to 0..`CLAIM_WAIT_MAX_MS` (5000). Retries (tasks that ran before) are leased first, then new work in
+  creation order; new detect work isn't leased while backpressure is on. The wait ends as soon as a commit makes
+  work of that stage PENDING. If the client disconnects before the answer, the leases are released (no attempt).
+- In hybrid mode `/tasks/claim` is `409 { "error": "CLAIM_MODE_HYBRID" }`.
+- `system.queues.detect/classify` = claimable PENDING rows (counted up to 100,000); `system.config.detectQueueTarget`
+  = 0.
+
+**Completing**
+
+- `POST /tasks/:id/complete` with `"next": k` (1..`maxClaimBatch`) → `{ "ok": true, "leases": [Lease…] }`; without
+  `next` the response stays `{ "ok": true }`. 409/404/400 as before.
+- `POST /tasks/complete-batch` `{ workerId, items: [{ taskId, leaseEpoch, result, timings }] (≤ 1000), next }`
+  → `{ "results": [{ "taskId", "status": "ok" | "stale" | "invalid" }], "leases": [...] }`, results in item order.
+  `stale` = fenced off (old epoch, or the task already finished; a `stale_rejected` event is written). `invalid` =
+  malformed item, unknown task, or a detect task without a `detections` array; an invalid item keeps its lease.
+  A body that isn't `{ workerId, items[] }` is a 400. The whole batch is one statement: accepted rows commit
+  together.
+- `next` is honoured even if every item was stale.
+- `system.timings.completeMs` = the complete statement's time shared over the items it completed (claim-next time
+  not included). A lease's `claimMs` is its share of the request that delivered it (claim-confirm, `/tasks/claim`,
+  or the complete that carried `next`).
+- Workers buffer results: `COMPLETE_BATCH` (0 = auto: the claim batch; 1 = one complete per task) and
+  `COMPLETE_FLUSH_MS` (50). With `PREFETCH=1` (default) a worker downloads the next leased image while the
+  current one runs; `fetchMs` is then only the part of the download the task still waited for.
+
+**Dispatch**
+
+- `DISPATCH_MODE=push` (default): task IDs are pushed right after the commit that made them PENDING (job
+  creation, classify task creation, requeue, release, redrive, deregister, end of a retry backoff); a detect claim
+  triggers a single-flight top-up of `queue:detect`. The 200 ms tick is a repair sweep for rows still
+  `queued=false`; `system.dispatcher.lastSweepRepaired` counts what it pushed. `DISPATCH_MODE=tick` restores P1.
+- `DETECT_QUEUE_TARGET` empty/0 (default) = max(`DETECT_QUEUE_MIN` (8), 2 × Σ live detect workers' `claimBatch`);
+  a positive value pins it.

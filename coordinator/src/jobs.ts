@@ -3,9 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { config } from "./config.js";
 import { query, tx } from "./db.js";
-import { isThrottled } from "./dispatcher.js";
+import { afterJobCreated, isThrottled, queueDepths } from "./dispatcher.js";
 import { hub, recordEvents, type EventInput } from "./events.js";
-import { getRedis, keys } from "./redis.js";
 import { categorize, categorizeSpecies, maybeFinishJob, type Category, type ClassificationRow, type Detection } from "./results.js";
 import { imageKey, presign, putIfMissing } from "./storage.js";
 import { ValidationError } from "./tasks.js";
@@ -54,8 +53,9 @@ interface PlannedImage {
  *    classification → finalised right here, no tasks (cache_hit).
  *  - detection cached, animal, classification not cached → cache_hit, only a classify task.
  *  - otherwise → a detect task.
- * Tasks are created PENDING/unqueued; the dispatcher moves them into Redis. A fully cached job
- * is marked done inside the same transaction, so it is finished when this call returns.
+ * Tasks are created PENDING/unqueued and pushed right after the commit (afterJobCreated; the
+ * dispatcher's repair sweep catches a push that never happened). A fully cached job is marked
+ * done inside the same transaction, so it is finished when this call returns.
  */
 export async function createJob(opts: {
   name: string;
@@ -162,10 +162,16 @@ export async function createJob(opts: {
   hub.publishEvents(events);
   hub.jobChanged(jobId);
   telemetry.recordJobCreated(cacheHits, plan.length);
+  if (withTask.length > 0) await dispatchAfterCommit();
   console.log(
     `[jobs] created ${opts.name} (${jobId}): ${plan.length} images, ${cacheHits} cache hits, ${withTask.length} tasks`,
   );
   return { jobId, total: plan.length, cacheHits, done };
+}
+
+/** The job is committed; a failed push only delays dispatch until the repair sweep. */
+async function dispatchAfterCommit() {
+  await afterJobCreated().catch((err) => console.error(`[jobs] post-commit dispatch failed: ${err.message}`));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -210,6 +216,7 @@ export async function createSyntheticJob(count: unknown, stage: unknown = "detec
     );
   });
   hub.jobChanged(jobId);
+  await dispatchAfterCommit();
   console.log(`[jobs] created synthetic-${n} (${jobId}): ${n} ${stage} tasks in ${Date.now() - started} ms`);
   return { jobId };
 }
@@ -414,7 +421,7 @@ export async function jobSummary(jobId: string): Promise<JobSummary | null> {
         where i.job_id = $1 and t.state in ('PENDING', 'LEASED') group by t.stage`,
       [jobId],
     ),
-    getRedis().llen(keys.queue("classify")),
+    queueDepths().then((q) => q.classify),
   ]);
   const c = counts.rows[0];
   const created = new Date(job.created_at);

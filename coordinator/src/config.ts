@@ -14,6 +14,12 @@ function str(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
   return raw === undefined || raw === "" ? fallback : raw;
 }
 
+function oneOf<T extends string>(env: NodeJS.ProcessEnv, name: string, allowed: readonly T[]): T {
+  const v = str(env, name, allowed[0]);
+  if (!(allowed as readonly string[]).includes(v)) throw new Error(`env ${name} must be one of ${allowed.join(", ")}, got "${v}"`);
+  return v as T;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   return {
     port: num(env, "PORT", 3000),
@@ -34,11 +40,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     heartbeatMs: num(env, "HEARTBEAT_MS", 2000),
     workerTimeoutMs: num(env, "WORKER_TIMEOUT_MS", 6000),
     maxAttempts: num(env, "MAX_ATTEMPTS", 3),
+    // Claim batch: workers size it online (≈ round trip ÷ service time, RabbitMQ's prefetch rule)
+    // between this floor and MAX_CLAIM_BATCH. Equal values pin it.
     claimBatchSize: num(env, "CLAIM_BATCH_SIZE", 1),
+    maxClaimBatch: num(env, "MAX_CLAIM_BATCH", 16),
     animalConfThreshold: num(env, "ANIMAL_CONF_THRESHOLD", 0.2),
     classifyQueueHighWater: num(env, "CLASSIFY_QUEUE_HIGH_WATER", 500),
     classifyQueueLowWater: num(env, "CLASSIFY_QUEUE_LOW_WATER", 200),
-    detectQueueTarget: num(env, "DETECT_QUEUE_TARGET", 50),
+    // queue:detect depth. 0 (default) = scale with live detect workers × their claim batch, never
+    // below DETECT_QUEUE_MIN; a positive value pins it (the P1 behaviour, and what tests use).
+    detectQueueTarget: num(env, "DETECT_QUEUE_TARGET", 0),
+    detectQueueMin: num(env, "DETECT_QUEUE_MIN", 8),
     defaultCountry: str(env, "DEFAULT_COUNTRY", "TZA"),
     humanReviewSecondsPerImage: num(env, "HUMAN_REVIEW_SECONDS_PER_IMAGE", 3),
 
@@ -59,7 +71,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     maxPauseMs: num(env, "MAX_PAUSE_MS", 120000),
 
     // Telemetry (GET /system and the websocket `system` message).
-    claimMode: str(env, "CLAIM_MODE", "hybrid"),
+    // hybrid: Redis ready queues + claim-confirm. postgres: no Redis queue, workers long-poll
+    // POST /tasks/claim (one UPDATE … FOR UPDATE SKIP LOCKED). Same leases and fencing either way.
+    claimMode: oneOf(env, "CLAIM_MODE", ["hybrid", "postgres"] as const),
+    // push: task IDs are pushed right after the commit that made them PENDING; the 200 ms tick
+    // is only a repair sweep. tick: the P1 dispatcher (the tick does all dispatching).
+    dispatchMode: oneOf(env, "DISPATCH_MODE", ["push", "tick"] as const),
+    /** Longest a POST /tasks/claim long-poll may wait. */
+    claimWaitMaxMs: num(env, "CLAIM_WAIT_MAX_MS", 5000),
     modelBackend: str(env, "MODEL_BACKEND", "speciesnet"),
     systemIntervalMs: num(env, "SYSTEM_INTERVAL_MS", 500),
     invariantIntervalMs: num(env, "INVARIANT_INTERVAL_MS", 5000),
