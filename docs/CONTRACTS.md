@@ -301,3 +301,10 @@ Produced by the benchmark harness:
   "overhead": { "before": { "perTaskMs": 46 }, "after": { "perTaskMs": 8 } },
   "faults": { "runs": 12, "faultsInjected": 60, "violations": 0 } }
 ```
+
+## Native (non-container) workers
+
+`POST /workers/register` accepts optional `"runtime": "container" | "native"` (default container) and
+`"device": "cpu" | "mps" | "cuda"` (default cpu). Worker objects in `GET /workers` / `worker_update` carry both.
+For a native worker, `/workers/:id/kill` and `/workers/:id/pause` return 409 `{ "error": "NOT_A_CONTAINER" }`;
+the dashboard shows a "native · MPS" badge and disables those buttons.
