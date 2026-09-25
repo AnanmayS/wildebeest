@@ -66,7 +66,8 @@ def build_schedule(seed: int, runs: int, per_run: int, types: list[str] = FAULTS
 
 
 class Toxiproxy:
-    def __init__(self, url: str = TOXI) -> None:
+    def __init__(self, url: str = TOXI, coordinator_upstream: str = "coordinator:3000") -> None:
+        self.coordinator_upstream = coordinator_upstream
         self.url = url
         self.http = requests.Session()
 
@@ -82,7 +83,7 @@ class Toxiproxy:
         raise TimeoutError("toxiproxy API not reachable")
 
     def setup(self) -> None:
-        for name, listen, upstream in (("coordinator", "0.0.0.0:8666", "coordinator:3000"),
+        for name, listen, upstream in (("coordinator", "0.0.0.0:8666", self.coordinator_upstream),
                                        ("redis", "0.0.0.0:8679", "redis:6379")):
             self.http.delete(f"{self.url}/proxies/{name}", timeout=5)
             r = self.http.post(f"{self.url}/proxies", json={"name": name, "listen": listen, "upstream": upstream,
@@ -108,7 +109,7 @@ class FaultRunner:
     def __init__(self, stack: Stack, args) -> None:
         self.stack = stack
         self.args = args
-        self.toxi = Toxiproxy()
+        self.toxi = Toxiproxy(coordinator_upstream=stack.coordinator_upstream)
         self.env = {"FAKE_MODEL_DELAY_MS": str(args.fake_delay_ms)}
         self.sampler: LiveSampler | None = None
         self._local = threading.local()
@@ -223,7 +224,11 @@ class FaultRunner:
             time.sleep(1)
             self.stack.docker("start", cid)
         elif t == "coordinator":
-            cid = self.stack.service_container("coordinator")
+            # With HA this kills the current leader replica, the interesting case: the survivor must win
+            # the election, and the load balancer keeps the API up in the meantime.
+            svc = self.stack.leader_service()
+            rec["service"] = svc
+            cid = self.stack.service_container(svc)
             self.sampler.suppress(120)
             self.stack.docker("kill", cid)
             time.sleep(1)
@@ -425,7 +430,7 @@ def main(argv=None) -> int:
     runner = FaultRunner(stack, args)
     runs = []
     try:
-        stack.up_infra(build=not args.no_build, services=("postgres", "redis", "minio", "coordinator", "toxiproxy"))
+        stack.up_infra(build=not args.no_build, services=[*stack.infra_services(), "toxiproxy"])
         runner.toxi.wait()
         runner.toxi.setup()
         schedule = build_schedule(args.seed, args.runs, args.faults_per_run,

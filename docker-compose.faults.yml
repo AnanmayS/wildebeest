@@ -6,7 +6,7 @@
 # the fault runner can add latency or reset connections between workers and the control plane
 # without touching the coordinator. The runner creates the two proxies through toxiproxy's API
 # (host port TOXIPROXY_PORT, default 38474) before it starts any worker:
-#   coordinator  toxiproxy:8666 -> coordinator:3000
+#   coordinator  toxiproxy:8666 -> coordinator-lb:3000 (or coordinator:3000 on pre-HA checkouts)
 #   redis        toxiproxy:8679 -> redis:6379
 # MinIO, Redis and coordinator restarts, SIGKILL and docker pause are done with the Docker CLI.
 services:

@@ -91,7 +91,34 @@ class Stack:
             raise RuntimeError(f"{' '.join(cmd)} failed ({res.returncode}):\n{res.stdout}\n{res.stderr}")
         return res
 
-    def up_infra(self, build: bool = True, services: Iterable[str] = ("postgres", "redis", "minio", "coordinator")) -> None:
+    def compose_services(self) -> set[str]:
+        """Services the target checkout's Compose files define (the frozen "before" copy has no HA replicas)."""
+        if not hasattr(self, "_services"):
+            out = self.compose("config", "--services").stdout
+            self._services = set(out.split())
+        return self._services
+
+    def infra_services(self) -> list[str]:
+        """Everything but the workers. With coordinator HA, the host's COORDINATOR_PORT belongs to the load
+        balancer, so both replicas and the balancer must be up."""
+        base = ["postgres", "redis", "minio", "coordinator"]
+        return base + [s for s in ("coordinator-2", "coordinator-lb") if s in self.compose_services()]
+
+    @property
+    def coordinator_upstream(self) -> str:
+        """In-network address workers use for the coordinator API."""
+        return "coordinator-lb:3000" if "coordinator-lb" in self.compose_services() else "coordinator:3000"
+
+    def leader_service(self) -> str:
+        """Compose service of the current leader replica (coord-2 is `coordinator-2`), or `coordinator`."""
+        try:
+            leader = (self.http.get(self.api_url + "/system", timeout=3).json() or {}).get("leader") or {}
+        except (requests.RequestException, ValueError):
+            leader = {}
+        return "coordinator-2" if leader.get("id") == "coord-2" and "coordinator-2" in self.compose_services() else "coordinator"
+
+    def up_infra(self, build: bool = True, services: Iterable[str] | None = None) -> None:
+        services = list(services) if services is not None else self.infra_services()
         log(f"[{self.project}] starting {', '.join(services)} from {self.target}")
         self.compose("up", "-d", *(["--build"] if build else []), *services)
         self.wait_healthy()
