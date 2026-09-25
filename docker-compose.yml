@@ -78,6 +78,11 @@ services:
       DETECT_QUEUE_TARGET: ${DETECT_QUEUE_TARGET:-50}
       DEFAULT_COUNTRY: ${DEFAULT_COUNTRY:-TZA}
       HUMAN_REVIEW_SECONDS_PER_IMAGE: ${HUMAN_REVIEW_SECONDS_PER_IMAGE:-3}
+      # Docker die/oom events as the fast failure detector (auto | off); heartbeats stay the backstop.
+      DOCKER_EVENTS: ${DOCKER_EVENTS:-auto}
+      # Full-jitter backoff before a failed task is retried: random(0, min(max, base * 2^errors)).
+      RETRY_BASE_MS: ${RETRY_BASE_MS:-500}
+      RETRY_MAX_MS: ${RETRY_MAX_MS:-30000}
     ports: ["${COORDINATOR_PORT:-3000}:3000"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

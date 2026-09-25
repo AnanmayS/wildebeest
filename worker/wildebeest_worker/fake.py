@@ -9,7 +9,10 @@ import hashlib
 import random
 import time
 
-from .labels import ANIMAL, HUMAN, TARGET_SPECIES, VEHICLE, common_name, top_animal
+from .labels import ANIMAL, HUMAN, TARGET_SPECIES, VEHICLE, common_name, sort_detections, top_animal
+
+# POST /jobs/synthetic creates images with this key prefix and no object behind them.
+SYNTHETIC_PREFIX = "synthetic/"
 
 # Real SpeciesNet taxonomy strings, so common_name() and the DB look like the real thing.
 FAKE_LABELS = {
@@ -82,3 +85,26 @@ class FakeClassifier:
         if top_animal(detections) is None:
             raise ValueError("classify task without an animal detection")
         return fake_classification(sha256)
+
+
+def synthetic_aware(handler, stage: str, model, model_version: str):
+    """Wraps a fake-backend stage handler so synthetic benchmark leases never touch MinIO.
+
+    Synthetic tasks (object key "synthetic/<sha>") have no image to download and must not
+    upload a crop; the fake model only needs the sha256. Every other lease goes to `handler`
+    unchanged. The per-task delay is still the model's FAKE_MODEL_DELAY_MS (0 is allowed), so
+    the orchestration benchmark can run 0 ms tasks.
+    """
+
+    def handle(lease: dict) -> dict:
+        if not str(lease.get("imageKey", "")).startswith(SYNTHETIC_PREFIX):
+            return handler(lease)
+        sha = lease["sha256"]
+        if stage == "detect":
+            return {"modelVersion": model_version, "detections": sort_detections(model.detect(None, sha256=sha))}
+        # A synthetic classify task may have no stage 1 detections at all (stage="classify"
+        # jobs), so skip the fake classifier's animal check and just take its time.
+        time.sleep(model.delay_s)
+        return {"modelVersion": model_version, **fake_classification(sha), "cropKey": None}
+
+    return handle

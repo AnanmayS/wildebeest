@@ -148,7 +148,7 @@ describe("worker protocol over HTTP", () => {
 
     // The event log endpoint shows the story, newest first.
     const log = (await api("GET", "/events?limit=10")).body.events.map((e: any) => e.type);
-    expect(log).toEqual(["stale_rejected", "job_done", "reassigned", "worker_died"]);
+    expect(log).toEqual(["heartbeat_refused", "stale_rejected", "job_done", "reassigned", "worker_died"]);
   });
 
   it("runs the two-stage pipeline and serves the gallery with presigned URLs", async () => {

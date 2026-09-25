@@ -8,6 +8,8 @@ import { hub, recordEvents, type EventInput } from "./events.js";
 import { getRedis, keys } from "./redis.js";
 import { categorize, categorizeSpecies, maybeFinishJob, type Category, type ClassificationRow, type Detection } from "./results.js";
 import { imageKey, presign, putIfMissing } from "./storage.js";
+import { ValidationError } from "./tasks.js";
+import { telemetry } from "./telemetry.js";
 
 // ---------------------------------------------------------------------------------------------
 // Job creation
@@ -159,10 +161,57 @@ export async function createJob(opts: {
 
   hub.publishEvents(events);
   hub.jobChanged(jobId);
+  telemetry.recordJobCreated(cacheHits, plan.length);
   console.log(
     `[jobs] created ${opts.name} (${jobId}): ${plan.length} images, ${cacheHits} cache hits, ${withTask.length} tasks`,
   );
   return { jobId, total: plan.length, cacheHits, done };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Synthetic jobs (orchestration benchmark)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * n images with random sha256 and object_key "synthetic/<sha>", one PENDING task each, and no
+ * MinIO object: fake-backend workers skip the download for synthetic keys. Everything is
+ * generated inside Postgres in one statement, so even a million rows never cross the wire.
+ * No per-task `enqueued` events are written (they would double the insert volume for nothing).
+ * The random hashes never hit the content-hash cache, and synthetic jobs are left out of the
+ * cache hit rate.
+ */
+export async function createSyntheticJob(count: unknown, stage: unknown = "detect") {
+  const n = Number(count);
+  if (!Number.isInteger(n) || n < 1 || n > config.maxSyntheticTasks) {
+    throw new ValidationError(`count must be an integer between 1 and ${config.maxSyntheticTasks}`);
+  }
+  if (stage !== "detect" && stage !== "classify") throw new ValidationError("stage must be 'detect' or 'classify'");
+
+  const jobId = randomUUID();
+  const started = Date.now();
+  await tx(async (c) => {
+    await c.query(
+      `insert into jobs (id, name, status, total_images, country_code) values ($1, $2, 'running', $3, $4)`,
+      [jobId, `synthetic-${n}`, n, config.defaultCountry],
+    );
+    await c.query(
+      `with gen as materialized (
+         select g, gen_random_uuid() as image_id, gen_random_uuid() as task_id,
+                encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex') as sha
+           from generate_series(1, $2::int) g
+       ),
+       imgs as (
+         insert into images (id, job_id, sha256, object_key, original_name)
+         select image_id, $1, sha, 'synthetic/' || sha, 'synthetic-' || g from gen
+       )
+       insert into tasks (id, image_id, stage, state, enqueued_at)
+       select task_id, image_id, $3, 'PENDING', now() + (g * interval '1 microsecond') from gen`,
+      [jobId, n, stage],
+    );
+  });
+  hub.jobChanged(jobId);
+  console.log(`[jobs] created synthetic-${n} (${jobId}): ${n} ${stage} tasks in ${Date.now() - started} ms`);
+  return { jobId };
 }
 
 // ---------------------------------------------------------------------------------------------

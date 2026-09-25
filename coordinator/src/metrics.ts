@@ -1,5 +1,7 @@
 import { query } from "./db.js";
+import { deathWatchStatus } from "./deathwatch.js";
 import { isThrottled } from "./dispatcher.js";
+import { reaperStalls } from "./reaper.js";
 import { getRedis, keys } from "./redis.js";
 
 /**
@@ -106,5 +108,8 @@ export async function computeMetrics() {
     // Latency of the most recent job that actually ran through workers (not a pure cache rerun).
     latency: jobs.find((j) => j.cacheHits < j.total)?.latency ?? { p50: 0, p95: 0, samples: 0 },
     jobs,
+    // Failure detection health: is the Docker event fast path live, and is the reaper on time?
+    deathWatch: deathWatchStatus(),
+    reaper: reaperStalls.stats(),
   };
 }

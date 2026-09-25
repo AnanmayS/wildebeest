@@ -1,5 +1,10 @@
 import { closePool, migrate, query } from "../src/db.js";
 import { resetDispatcherState } from "../src/dispatcher.js";
+import { setDockerOps } from "../src/docker.js";
+import { resetInvariants } from "../src/invariants.js";
+import { resetSystemSnapshot } from "../src/system.js";
+import { setJitterSource } from "../src/tasks.js";
+import { telemetry } from "../src/telemetry.js";
 import { createJob, sha256Of, type ImageInput } from "../src/jobs.js";
 import { closeRedis, getRedis, keys } from "../src/redis.js";
 import { ensureBucket } from "../src/storage.js";
@@ -20,6 +25,11 @@ export async function resetState() {
   );
   await getRedis().flushdb();
   resetDispatcherState();
+  telemetry.reset();
+  resetInvariants();
+  resetSystemSnapshot();
+  setJitterSource();
+  setDockerOps();
 }
 
 export async function teardown() {
@@ -37,9 +47,24 @@ export async function makeJob(seeds: string[], name = "test") {
   return createJob({ name, images: seeds.map(fakeImage) });
 }
 
-export async function registerTestWorker(stage: "detect" | "classify", hostname: string) {
-  const { workerId } = await registerWorker({ stage, hostname, containerId: hostname });
+export async function registerTestWorker(
+  stage: "detect" | "classify",
+  hostname: string,
+  opts: { containerId?: string; runtime?: "container" | "native" } = {},
+) {
+  const { workerId } = await registerWorker({ stage, hostname, containerId: opts.containerId ?? hostname, runtime: opts.runtime });
   return workerId;
+}
+
+/** Polls until fn() is truthy (for effects that land asynchronously, e.g. stream events). */
+export async function eventually<T>(fn: () => Promise<T> | T, timeoutMs = 3000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() > deadline) throw new Error("condition not met in time");
+    await new Promise((r) => setTimeout(r, 20));
+  }
 }
 
 /** What a real worker does: move one ID from the ready queue to its processing list, then confirm. */

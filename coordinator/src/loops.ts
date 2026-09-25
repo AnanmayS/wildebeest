@@ -1,7 +1,9 @@
 import { config } from "./config.js";
 import { query } from "./db.js";
 import { dispatchOnce, rebuildQueues } from "./dispatcher.js";
-import { reapOnce } from "./reaper.js";
+import { checkInvariants } from "./invariants.js";
+import { reapOnce, reaperStalls } from "./reaper.js";
+import { flushCompleteTimings } from "./tasks.js";
 
 /** Runs fn every intervalMs, never overlapping itself; returns a stop function. */
 export function every(name: string, intervalMs: number, fn: () => Promise<unknown>) {
@@ -25,7 +27,13 @@ export function every(name: string, intervalMs: number, fn: () => Promise<unknow
 export function startLoops() {
   const stops = [
     every("dispatcher", config.dispatchIntervalMs, dispatchOnce),
-    every("reaper", config.reapIntervalMs, reapOnce),
+    every("reaper", config.reapIntervalMs, async () => {
+      const stall = reaperStalls.tick();
+      if (stall >= 1000) console.warn(`[reaper] ran ${stall} ms late; extending worker grace to ${reaperStalls.graceMs()} ms`);
+      return reapOnce();
+    }),
+    every("invariants", config.invariantIntervalMs, checkInvariants),
+    every("timings", 1000, flushCompleteTimings),
   ];
   return () => stops.forEach((s) => s());
 }

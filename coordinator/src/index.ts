@@ -1,6 +1,8 @@
 import http from "node:http";
 import { createApp } from "./api.js";
 import { stopChaos } from "./chaos.js";
+import { startDeathWatch, stopDeathWatch } from "./deathwatch.js";
+import { resumeAll } from "./docker.js";
 import { config } from "./config.js";
 import { closePool, migrate } from "./db.js";
 import { hub } from "./events.js";
@@ -8,6 +10,7 @@ import { jobSummary } from "./jobs.js";
 import { reconcileOnStartup, startLoops } from "./loops.js";
 import { closeRedis } from "./redis.js";
 import { ensureBucket } from "./storage.js";
+import { systemSnapshot } from "./system.js";
 import { listWorkers } from "./workers.js";
 
 async function waitFor<T>(what: string, fn: () => Promise<T>, attempts = 60): Promise<T> {
@@ -30,9 +33,12 @@ async function main() {
 
   const app = createApp();
   const server = http.createServer(app);
-  hub.setBuilders({ jobSummary, workerList: listWorkers });
+  hub.setBuilders({ jobSummary, workerList: listWorkers, system: systemSnapshot });
   hub.attach(server);
   const stopLoops = startLoops();
+  // The fast failure detector; without it (no Docker socket / not in Compose) the heartbeat
+  // timeout alone detects deaths.
+  await startDeathWatch().catch((err) => console.error(`[deathwatch] failed to start: ${err.message}`));
 
   server.listen(config.port, () => {
     console.log(
@@ -48,6 +54,8 @@ async function main() {
     console.log(`[shutdown] ${signal}`);
     stopLoops();
     stopChaos();
+    stopDeathWatch();
+    await resumeAll();
     hub.close();
     server.close();
     await Promise.allSettled([closePool(), closeRedis()]);

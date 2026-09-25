@@ -308,3 +308,80 @@ Produced by the benchmark harness:
 `"device": "cpu" | "mps" | "cuda"` (default cpu). Worker objects in `GET /workers` / `worker_update` carry both.
 For a native worker, `/workers/:id/kill` and `/workers/:id/pause` return 409 `{ "error": "NOT_A_CONTAINER" }`;
 the dashboard shows a "native · MPS" badge and disables those buttons.
+
+## P1 refinements (coordinator P1, 2026-09-25)
+
+Recorded by the P1 coordinator work. Nothing above changes shape; these pin down details the v2 section left
+open and add a few fields the dashboard asked for.
+
+**Worker protocol**
+
+- `POST /workers/register` body is now `{ stage, hostname, containerId, runtime, device }`. Native workers send
+  `containerId: "native-<hostname>"`. Unknown `runtime`/`device` values are a 400.
+- `POST /tasks/:id/complete` body may carry `"timings": { "claimMs", "fetchMs", "inferMs", "uploadMs" }` (ms, ≥ 0).
+  `claimMs` = claim-confirm round trip; `fetchMs`/`uploadMs` = time inside object-storage reads/writes (download
+  + decode / crop upload); `inferMs` = handler time − fetch − upload. Malformed timings are ignored (never a 400).
+- `POST /tasks/:id/fail` accepts `"nonRetryable": true` → the task goes straight to FAILED (the DLQ). Otherwise a
+  retryable failure is delayed by full-jitter backoff before re-dispatch:
+  `not_before = now + random(0, min(RETRY_MAX_MS, RETRY_BASE_MS · 2^(taskErrors−1)))` (defaults 500 ms / 30 s).
+- `POST /tasks/:id/release` `{ workerId, leaseEpoch, reason }` → `{ ok: true }` | 409 `STALE_LEASE` | 404.
+  No attempt is spent and there is no backoff.
+- **Attempt budget.** `attempts` (unchanged column, still the counter checked against `MAX_ATTEMPTS`) = `task_errors`
+  (retryable `/fail`) + `lease_losses` (lease expired / worker died). Free, uncounted returns go to `releases`:
+  `/release`, deregister, re-register, and leases lost because the **coordinator itself** killed or paused the
+  worker: every lease held by an incarnation we SIGKILLed (`workers.killed_at ≥ registered_at`), and leases of
+  tasks started before a pause we injected ended (`paused_at ≥ registered_at` and `started_at ≤ paused_until`).
+  A non-retryable `/fail` is FAILED regardless of the budget.
+- Worker behaviour: infrastructure errors (S3 unreachable/5xx, timeouts, connection errors) → `/release` and a
+  worker-side circuit breaker (no claims, probe `HEAD bucket` with full-jitter backoff, heartbeats continue);
+  undecodable image / missing object → `/fail` with `nonRetryable`; anything else → `/fail`.
+  `complete`/`fail`/`release` are retried on connection errors and 502/503/504 for up to one lease length.
+  A worker that was told `410 WORKER_DEAD` while a task was in flight still posts that result **once** (it is
+  fenced with 409 unless its lease somehow survived), then re-registers.
+- Recovered tasks (dead worker, lost lease) are LPUSHed to the head of their queue immediately after the requeue
+  commits, by the reaper / death watch itself, not on the next dispatcher tick.
+
+**Dashboard API additions**
+
+- `POST /workers/:id/pause` `{ "ms": 1..120000 }` (default 20000) → `{ "ok": true, "resumesAt": "…" }`;
+  409 `ALREADY_PAUSED` | 409 `NOT_A_CONTAINER` | 404 | 502 (Docker refused). Kill gets the same 409/404/502 rules.
+- `GET /dlq?limit=100` → `{ "tasks": [ { "taskId", "jobId", "jobName", "imageId", "originalName", "imageUrl", "stage",
+  "error", "attempts", "taskErrors", "leaseLosses", "releases", "leaseEpoch", "failedAt" } ], "total": n }`, newest first.
+- `POST /dlq/:taskId/redrive` → `{ "ok": true }`: FAILED → PENDING with `attempts`/`taskErrors`/`leaseLosses` reset,
+  the image un-finalised and its job reopened (`done` → `running`). 409 `NOT_FAILED` | 409 `JOB_CANCELLED` | 404.
+- `POST /jobs/synthetic` validates `count` (integer 1..`MAX_SYNTHETIC_TASKS`, default 1,000,000) and `stage`
+  (`detect` | `classify`, default detect). Presigned URLs are `null` for `synthetic/` keys.
+
+**Events**
+
+- Event-log items (`task_events` WS message and `GET /events`) now include `"detail"`: the event's stored detail,
+  unchanged (e.g. `worker_died.detail.via/detectMs`, `stale_rejected.detail.leaseEpoch/currentEpoch`,
+  `worker_paused.detail.ms`).
+- Log types added: `worker_paused`, `worker_resumed`, `released`, `redriven`, `heartbeat_refused`, `speculated`.
+- `worker_died.detail`: `{ stage, via, detectMs, silentMs }`, plus for Docker-detected deaths `exitCode`,
+  `dockerAction` (`die` | `oom`), `exitedAt` and `exitToDeadMs` (the coordinator's share of `detectMs`), and
+  `reconciled: true` when found by `docker ps` reconciliation rather than the event stream. `detectMs` runs from the
+  kill/pause request if we sent one to this incarnation, else the container's exit time, else the last heartbeat.
+- `reassigned` / `lease_expired` detail gains `charged: false` when the loss was caused by our own kill/pause.
+- `heartbeat_refused` `{ deadForMs, heldTaskIds }`: a worker declared DEAD heartbeated again (recorded once per death).
+- `released` `{ reason, stage }`; `redriven` `{ stage, jobId, previousError }`.
+
+**`system` snapshot details**
+
+- `recovery[]` is ordered **newest first** (at most 20) and each item gains `"reclaimedBy"`: the worker whose claim
+  re-took the last outstanding task (null until then, and when there was nothing to reclaim). `totalMs` runs from the
+  best known moment of death (as for `detectMs`) to `reclaimedAt`; with `tasks: 0` it ends at `requeuedAt`.
+- `timings` definitions (per task, over completions in the last `windowSec`; `ready` = became PENDING or its retry
+  backoff ended; `eligible` = the dispatcher could have pushed it, i.e. not held back by `DETECT_QUEUE_TARGET` or
+  backpressure):
+  - `dispatchWaitMs` = pushed − eligible: pure orchestration (tick delay + push latency in tick mode).
+  - `queueWaitMs` = (eligible − ready) + (claimed − pushed): backlog held in Postgres plus time in the Redis queue.
+  - `totalMs` = complete handled − ready. `completeMs` = the coordinator's handling time of the complete request.
+  - `overheadPct` = Σ(claimMs + completeMs + dispatchWaitMs) ÷ Σ(totalMs − queueWaitMs) × 100.
+- `stages.*.completedPerSec` = completions over the last 10 whole seconds ÷ 10. `p50ServiceMs` = p50 of
+  (complete handled − claimed) over the timings window.
+- `fencing.staleRejected` and `recovery` are counted since the coordinator process started.
+- `invariants`: `duplicateResults` = tasks with more than one accepted completion (`succeeded` events), cumulative;
+  `stuckLeases` = LEASED tasks on a non-ALIVE worker silent for more than `WORKER_TIMEOUT_MS` + 2 reaper ticks, or
+  whose lease expired more than 2 ticks ago; `lostImages` = unfinished images of running jobs with no PENDING/LEASED
+  task. Checked every 5 s.

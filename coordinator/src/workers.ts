@@ -1,6 +1,6 @@
 import { config } from "./config.js";
-import { query } from "./db.js";
-import { hub } from "./events.js";
+import { getPool, query } from "./db.js";
+import { hub, recordEvents } from "./events.js";
 import { getRedis, keys } from "./redis.js";
 import { presign } from "./storage.js";
 import { isUuid, releaseWorkerTasks, requeueWaiting, ValidationError } from "./tasks.js";
@@ -24,19 +24,36 @@ async function setAlive(workerId: string) {
  * PENDING-and-queued are pushed back; anything else is already leased, done, or will be
  * re-dispatched from Postgres.
  */
-export async function drainProcessingList(workerId: string): Promise<number> {
+export async function drainProcessingList(workerId: string): Promise<string[]> {
   const key = keys.processing(workerId);
   const res = await getRedis().multi().lrange(key, 0, -1).del(key).exec();
   const ids = (res?.[0]?.[1] as string[] | undefined) ?? [];
-  if (ids.length === 0) return 0;
+  if (ids.length === 0) return [];
   return requeueWaiting(ids);
 }
 
-export async function registerWorker(body: { stage?: unknown; hostname?: unknown; containerId?: unknown }) {
+const RUNTIMES = ["container", "native"] as const;
+const DEVICES = ["cpu", "mps", "cuda"] as const;
+
+function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
+  if (value === undefined || value === null || value === "") return allowed[0];
+  if (typeof value === "string" && (allowed as readonly string[]).includes(value)) return value as T;
+  throw new ValidationError(`${what} must be one of ${allowed.join(", ")}`);
+}
+
+export async function registerWorker(body: {
+  stage?: unknown;
+  hostname?: unknown;
+  containerId?: unknown;
+  runtime?: unknown;
+  device?: unknown;
+}) {
   const stage = body.stage;
   if (stage !== "detect" && stage !== "classify") throw new ValidationError("stage must be 'detect' or 'classify'");
   const hostname = typeof body.hostname === "string" && body.hostname ? body.hostname : "anon";
   const containerId = typeof body.containerId === "string" && body.containerId ? body.containerId : hostname;
+  const runtime = oneOf(body.runtime, RUNTIMES, "runtime");
+  const device = oneOf(body.device, DEVICES, "device");
   const id = workerIdFor(stage, hostname);
 
   // Same ID registering again means the worker process restarted: whatever the previous
@@ -45,16 +62,17 @@ export async function registerWorker(body: { stage?: unknown; hostname?: unknown
   await drainProcessingList(id);
 
   await query(
-    `insert into workers (id, stage, hostname, container_id, status, registered_at, last_heartbeat_at)
-     values ($1, $2, $3, $4, 'ALIVE', now(), now())
+    `insert into workers (id, stage, hostname, container_id, runtime, device, status, registered_at, last_heartbeat_at)
+     values ($1, $2, $3, $4, $5, $6, 'ALIVE', now(), now())
      on conflict (id) do update
         set stage = excluded.stage, hostname = excluded.hostname, container_id = excluded.container_id,
+            runtime = excluded.runtime, device = excluded.device,
             status = 'ALIVE', registered_at = now(), last_heartbeat_at = now(), metrics = '{}'::jsonb`,
-    [id, stage, hostname, containerId],
+    [id, stage, hostname, containerId, runtime, device],
   );
   await setAlive(id);
   hub.workersChanged();
-  console.log(`[workers] registered ${id} (container ${containerId})`);
+  console.log(`[workers] registered ${id} (${runtime}/${device}, container ${containerId})`);
   return {
     workerId: id,
     config: {
@@ -69,9 +87,7 @@ export async function registerWorker(body: { stage?: unknown; hostname?: unknown
 /**
  * Liveness + lease renewal. Returns false if the worker is not ALIVE (declared dead or stopped):
  * the API turns that into 410 WORKER_DEAD and the worker must drop its work and re-register.
- */
-/**
- * Liveness + lease renewal. Only the leases the worker says it still holds are renewed: a task it
+ * Only the leases the worker says it still holds are renewed: a task it
  * gave up on (e.g. its /complete retries ran out during a coordinator outage) is not in `taskIds`,
  * so its lease runs out and the reaper hands it to someone else instead of it staying LEASED forever.
  */
@@ -82,7 +98,10 @@ export async function heartbeat(workerId: string, metrics: unknown, taskIds: unk
     `update workers set last_heartbeat_at = now(), metrics = $2 where id = $1 and status = 'ALIVE'`,
     [workerId, JSON.stringify(m)],
   );
-  if (!rowCount) return false;
+  if (!rowCount) {
+    await recordRefusedHeartbeat(workerId, held);
+    return false;
+  }
   await query(
     `update tasks set lease_expires_at = now() + ($2::int * interval '1 millisecond')
       where worker_id = $1 and state = 'LEASED' and id = any($3::uuid[])`,
@@ -91,6 +110,25 @@ export async function heartbeat(workerId: string, metrics: unknown, taskIds: unk
   await setAlive(workerId);
   hub.workersChanged();
   return true;
+}
+
+/**
+ * A worker we declared DEAD is still alive (it was paused, partitioned, or just slow). Record it
+ * once per death, so the dashboard can show the zombie waking up; its late results are then fenced.
+ */
+async function recordRefusedHeartbeat(workerId: string, heldTaskIds: string[]) {
+  const { rows } = await query(
+    `select dead_at, (extract(epoch from (now() - dead_at)) * 1000)::int as dead_for_ms from workers
+      where id = $1 and status = 'DEAD'
+        and not exists (select 1 from task_events e where e.worker_id = $1 and e.type = 'heartbeat_refused'
+                                                      and e.at >= workers.dead_at)`,
+    [workerId],
+  );
+  if (rows.length === 0) return;
+  const events = await recordEvents(getPool(), [
+    { type: "heartbeat_refused", workerId, detail: { deadForMs: rows[0].dead_for_ms, heldTaskIds } },
+  ]);
+  hub.publishEvents(events);
 }
 
 /** Graceful exit: STOPPED (not DEAD), leases released without a reassignment storm. */
@@ -112,6 +150,8 @@ export interface WorkerView {
   state: "idle" | "busy" | "dead";
   containerId: string | null;
   hostname: string | null;
+  runtime: "container" | "native";
+  device: "cpu" | "mps" | "cuda";
   tasksCompleted: number;
   currentTaskIds: string[];
   currentImageUrl: string | null;
@@ -149,6 +189,8 @@ export async function listWorkers(): Promise<WorkerView[]> {
         state: !alive ? "dead" : taskIds.length > 0 ? "busy" : "idle",
         containerId: r.container_id,
         hostname: r.hostname,
+        runtime: r.runtime,
+        device: r.device,
         tasksCompleted: r.tasks_completed,
         currentTaskIds: alive ? taskIds : [],
         currentImageUrl: alive ? await presign(r.image_key ?? m.currentImageKey ?? null) : null,

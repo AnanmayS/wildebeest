@@ -3,11 +3,31 @@ import multer from "multer";
 import { getChaos, setChaos } from "./chaos.js";
 import { config } from "./config.js";
 import { getPool, query } from "./db.js";
-import { killWorker, WorkerNotFoundError } from "./docker.js";
+import { ConflictError, killWorker, pauseWorker, WorkerNotFoundError } from "./docker.js";
+import { listDlq, redrive } from "./dlq.js";
 import { recentLogEvents } from "./events.js";
-import { cancelJob, createJob, createSampleJob, jobImages, jobSummary, listJobs, SampleUnavailableError, sha256Of } from "./jobs.js";
+import {
+  cancelJob,
+  createJob,
+  createSampleJob,
+  createSyntheticJob,
+  jobImages,
+  jobSummary,
+  listJobs,
+  SampleUnavailableError,
+  sha256Of,
+} from "./jobs.js";
 import { computeMetrics } from "./metrics.js";
-import { claimConfirm, completeTask, failTask, isUuid, ValidationError, type Outcome } from "./tasks.js";
+import { systemSnapshot } from "./system.js";
+import {
+  claimConfirm,
+  completeTask,
+  failTask,
+  isUuid,
+  releaseTask,
+  ValidationError,
+  type Outcome,
+} from "./tasks.js";
 import { deregisterWorker, heartbeat, listWorkers, registerWorker } from "./workers.js";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 5000 } });
@@ -63,6 +83,10 @@ export function createApp() {
     res.json({ jobId });
   });
 
+  app.post("/jobs/synthetic", async (req, res) => {
+    res.json(await createSyntheticJob(req.body?.count, req.body?.stage ?? "detect"));
+  });
+
   app.get("/jobs", async (_req, res) => {
     res.json({ jobs: await listJobs() });
   });
@@ -99,6 +123,23 @@ export function createApp() {
 
   app.post("/workers/:id/kill", async (req, res) => {
     await killWorker(req.params.id, "api");
+    res.json({ ok: true });
+  });
+
+  app.post("/workers/:id/pause", async (req, res) => {
+    res.json(await pauseWorker(req.params.id, req.body?.ms ?? 20000, "api"));
+  });
+
+  app.get("/system", async (_req, res) => {
+    res.json(await systemSnapshot());
+  });
+
+  app.get("/dlq", async (req, res) => {
+    res.json(await listDlq(Number(req.query.limit ?? 100)));
+  });
+
+  app.post("/dlq/:taskId/redrive", async (req, res) => {
+    if (!(await redrive(req.params.taskId))) return res.status(404).json({ error: "NOT_FOUND" });
     res.json({ ok: true });
   });
 
@@ -152,13 +193,18 @@ export function createApp() {
   });
 
   app.post("/tasks/:id/complete", async (req, res) => {
-    const { workerId, leaseEpoch, result } = req.body ?? {};
-    sendOutcome(res, await completeTask(req.params.id, String(workerId ?? ""), leaseEpoch, result));
+    const { workerId, leaseEpoch, result, timings } = req.body ?? {};
+    sendOutcome(res, await completeTask(req.params.id, String(workerId ?? ""), leaseEpoch, result, timings));
   });
 
   app.post("/tasks/:id/fail", async (req, res) => {
-    const { workerId, leaseEpoch, error } = req.body ?? {};
-    sendOutcome(res, await failTask(req.params.id, String(workerId ?? ""), leaseEpoch, error));
+    const { workerId, leaseEpoch, error, nonRetryable } = req.body ?? {};
+    sendOutcome(res, await failTask(req.params.id, String(workerId ?? ""), leaseEpoch, error, nonRetryable === true));
+  });
+
+  app.post("/tasks/:id/release", async (req, res) => {
+    const { workerId, leaseEpoch, reason } = req.body ?? {};
+    sendOutcome(res, await releaseTask(req.params.id, String(workerId ?? ""), leaseEpoch, reason));
   });
 
   // ---- errors ------------------------------------------------------------------------------
@@ -170,11 +216,13 @@ export function createApp() {
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ValidationError) return res.status(400).json({ error: err.message });
     if (err instanceof WorkerNotFoundError) return res.status(404).json({ error: err.message });
+    if (err instanceof ConflictError) return res.status(409).json({ error: err.code, message: err.message });
     if (err instanceof SampleUnavailableError) return res.status(400).json({ error: err.message });
     if (err instanceof multer.MulterError) return res.status(400).json({ error: err.message });
     if (err?.type === "entity.parse.failed") return res.status(400).json({ error: "invalid JSON body" });
-    if (req.path.endsWith("/kill")) {
-      return res.status(502).json({ error: `docker kill failed: ${err?.message ?? err}` });
+    if (req.path.endsWith("/kill") || req.path.endsWith("/pause")) {
+      const op = req.path.endsWith("/kill") ? "kill" : "pause";
+      return res.status(502).json({ error: `docker ${op} failed: ${err?.message ?? err}` });
     }
     console.error(`[api] ${req.method} ${req.path} failed:`, err);
     res.status(500).json({ error: err?.message ?? "internal error" });

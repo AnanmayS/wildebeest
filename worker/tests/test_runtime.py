@@ -75,6 +75,7 @@ def make_worker(handler=None, batch=1):
         http=coord,
         hostname="abc123",
         startup_timeout_s=5,
+        runtime="container",
     )
     worker.register()
     worker.batch_size = batch
@@ -84,7 +85,8 @@ def make_worker(handler=None, batch=1):
 def test_register_sends_stage_and_container_id():
     worker, coord, _ = make_worker()
     assert worker.worker_id == "detect-w1"
-    assert coord.paths("/workers/register")[0] == {"stage": "detect", "hostname": "abc123", "containerId": "abc123"}
+    assert coord.paths("/workers/register")[0] == {"stage": "detect", "hostname": "abc123", "containerId": "abc123",
+                                                   "runtime": "container", "device": "cpu"}
 
 
 def test_register_retries_until_coordinator_is_up(monkeypatch):
@@ -168,9 +170,10 @@ def test_heartbeat_reports_held_tasks_and_metrics():
     assert set(seen["metrics"]) == {"tasksDone", "avgLatencyMs", "rssMb", "currentImageKey"}
 
 
-def test_worker_dead_drops_in_flight_result_and_reregisters(monkeypatch):
+def test_worker_dead_still_reports_in_flight_result_once_then_reregisters(monkeypatch):
     def handler(lease):
         coord.heartbeat_status = 410
+        coord.complete_status = 409  # the task was reassigned meanwhile
         worker.heartbeat_once()  # coordinator declares us dead mid-task
         return {"modelVersion": "v", "detections": []}
 
@@ -178,7 +181,9 @@ def test_worker_dead_drops_in_flight_result_and_reregisters(monkeypatch):
     r.rpush("queue:detect", "t1")
     worker.run_once()
     assert worker.dead.is_set()
-    assert coord.paths("/tasks/t1/complete") == []  # result dropped, not reported
+    # Reported once so the coordinator can fence it visibly (409 STALE_LEASE), never counted as done.
+    assert len(coord.paths("/tasks/t1/complete")) == 1
+    assert worker.tasks_done == 0
 
     # The main loop re-registers under a new ID before claiming again.
     coord.heartbeat_status = 200

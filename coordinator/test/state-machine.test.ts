@@ -183,20 +183,28 @@ describe("complete and fencing", () => {
 });
 
 describe("leases, retries and the reaper", () => {
-  it("requeues an expired lease with attempts+1 and re-dispatches it", async () => {
+  it("requeues an expired lease with attempts+1 and pushes it straight back to the queue", async () => {
     const { taskId } = await oneDetectTask();
     const w = await registerTestWorker("detect", "w1");
     await pullAndClaim(w, "detect");
     await expireLease(taskId);
 
     const r = await reapOnce();
-    expect(r.requeued).toBe(1);
-    expect(await task(taskId)).toMatchObject({ state: "PENDING", attempts: 1, queued: false, worker_id: null });
+    expect(r).toMatchObject({ requeued: 1, pushed: 1 });
+    expect(await task(taskId)).toMatchObject({
+      state: "PENDING",
+      attempts: 1,
+      lease_losses: 1,
+      releases: 0,
+      queued: true,
+      worker_id: null,
+    });
     const [ev] = await events("lease_expired", taskId);
     expect(ev.worker_id).toBe(w);
 
-    await dispatchOnce();
+    // Pushed right after the requeue committed, not on the next dispatcher tick.
     expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([taskId]);
+    expect((await dispatchOnce()).retried).toBe(0);
     const again = await pullAndClaim(w, "detect");
     expect(again?.leaseEpoch).toBe(2);
   });
@@ -207,10 +215,11 @@ describe("leases, retries and the reaper", () => {
     const w = await registerTestWorker("detect", "w1");
     const lease = await pullAndClaim(w, "detect");
     await expireLease(lease!.taskId);
-    await reapOnce();
 
-    // The queue is still full of new work, but the retry is pushed anyway, to the front.
-    expect((await dispatchOnce()).retried).toBe(1);
+    // The queue is still full of new work, but the retry is pushed anyway, to the front, by the
+    // reaper itself.
+    expect((await reapOnce()).pushed).toBe(1);
+    expect((await dispatchOnce()).retried).toBe(0);
     const queue = await getRedis().lrange(keys.queue("detect"), 0, -1);
     expect(queue[0]).toBe(lease!.taskId);
     expect(queue).toHaveLength(config.detectQueueTarget);
@@ -296,13 +305,13 @@ describe("leases, retries and the reaper", () => {
     expect((await events("reassigned", leased.taskId))[0].worker_id).toBe(dead);
     expect(await events("worker_died")).toHaveLength(1);
     expect(await getRedis().exists(keys.processing(dead))).toBe(0);
-    expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([unconfirmed]);
+    // Both recovered IDs are back at the head of the queue at once: the leased one first.
+    expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual([leased.taskId, unconfirmed]);
 
     // A dead worker's heartbeat is refused (→ 410 WORKER_DEAD).
     expect(await heartbeat(dead, {})).toBe(false);
 
     // The live worker picks both up; recovery is then complete.
-    await dispatchOnce();
     const got = [(await pullAndClaim(live, "detect"))!, (await pullAndClaim(live, "detect"))!];
     expect(got.map((l) => l.taskId).sort()).toEqual([leased.taskId, unconfirmed].sort());
     expect(got.find((l) => l.taskId === leased.taskId)!.leaseEpoch).toBe(2);

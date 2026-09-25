@@ -9,13 +9,18 @@ src/
   db.ts          pg pool, tx helper, SQL migration runner (migrations/*.sql, schema_migrations)
   redis.ts       key names: queue:{stage}, processing:{workerId}, worker:{id}:alive, wildebeest:throttled
   storage.ts     MinIO: ensure bucket, idempotent put, cached presigned URLs (S3_PUBLIC_ENDPOINT)
-  jobs.ts        job creation (upload / sample), cache lookup, JobSummary + gallery queries
-  tasks.ts       the state machine: claimConfirm, completeTask, failTask, requeueLostLeases, release
+  jobs.ts        job creation (upload / sample / synthetic), cache lookup, JobSummary + gallery queries
+  tasks.ts       the state machine: claim, complete, fail, release, requeueLostLeases (attempt accounting)
   results.ts     idempotent result writes, categorisation, image/job finalisation
-  dispatcher.ts  200 ms loop: Postgres PENDING → Redis ready queues, backpressure   (dispatchOnce)
-  reaper.ts      1 s loop: dead workers, lost leases, processing-list drain          (reapOnce)
+  dispatcher.ts  200 ms loop: Postgres PENDING → Redis ready queues, backpressure   (dispatchOnce, pushNow)
+  deathwatch.ts  Docker die/oom events for our Compose project → recovery, docker ps reconciliation
+  recovery.ts    the one death path: mark DEAD → requeue leases + processing list → LPUSH to queue head
+  reaper.ts      1 s loop: heartbeat backstop, lost leases, stall-aware grace       (reapOnce, StallMeter)
   workers.ts     register / heartbeat / deregister / list
-  docker.ts      SIGKILL through the Docker socket;  chaos.ts  random kills
+  docker.ts      SIGKILL and timed pause through the Docker socket;  chaos.ts  random kills
+  dlq.ts         GET /dlq, redrive
+  telemetry.ts   in-memory rolling counters, timing samples, recovery records
+  system.ts      GET /system + WebSocket `system` snapshot;  invariants.ts  live invariant check
   events.ts      task_events rows + WebSocket hub at /events;  metrics.ts  GET /metrics
   api.ts         Express routes;  index.ts  startup (migrate → bucket → reconcile → serve → loops)
 ```
@@ -29,9 +34,17 @@ src/
   echo it. A worker that stalled past its lease (GC pause, network partition) and then comes back
   holds an old epoch, so its late result gets `409 STALE_LEASE` (logged as `stale_rejected`), and the
   result from the worker that took over is the one kept.
-- **Leases + heartbeats.** A heartbeat renews all of the worker's leases. The reaper marks a worker
-  DEAD after `WORKER_TIMEOUT_MS` of silence and moves its tasks back to PENDING (attempts+1), or to
-  FAILED after `MAX_ATTEMPTS`. It does the same for any lease that simply expired.
+- **Death detection: listen first, infer second.** The coordinator subscribes to Docker `die`/`oom`
+  events for its own Compose project and recovers a killed worker in well under a second
+  (`deathwatch.ts`). The heartbeat timeout stays as the backstop: the reaper marks a worker DEAD after
+  `WORKER_TIMEOUT_MS` of silence, extended by its own recent stall. Both run the same path
+  (`recovery.ts`), which pushes the recovered task IDs to the head of their queue right after commit.
+- **Leases + heartbeats.** A heartbeat renews the leases the worker reports holding. Lost leases go
+  back to PENDING (attempts+1), or to FAILED after `MAX_ATTEMPTS`, unless the coordinator itself
+  killed or paused the worker, which costs no attempt.
+- **Retry hygiene.** Workers classify errors: infrastructure trouble → `/release` (free) plus a
+  worker-side circuit breaker; bad input → `/fail` with `nonRetryable` (straight to the DLQ); other
+  errors → `/fail` with full-jitter backoff before the retry. `GET /dlq` and redrive expose FAILED tasks.
 - **Processing lists.** `BLMOVE queue:{stage} processing:{workerId}` means a task ID is never only in
   a worker's memory. Claim-confirm, complete and fail `LREM` the ID. Anything left in a dead worker's
   list was taken but never confirmed; the reaper drains it back to the ready queue (LRANGE + DEL in

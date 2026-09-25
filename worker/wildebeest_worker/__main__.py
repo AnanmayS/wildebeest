@@ -14,20 +14,20 @@ SPECIESNET_MODEL = os.environ.get("SPECIESNET_MODEL", "kaggle:google/speciesnet/
 
 def build_handler(stage: str, backend: str, storage):
     """Load the model once and return handle(lease) -> result."""
-    fake_delay = int(os.environ.get("FAKE_MODEL_DELAY_MS", "300"))
+    fake_delay = int(os.environ.get("FAKE_MODEL_DELAY_MS", "300"))  # 0 allowed: pure orchestration
 
     if stage == "detect":
         from .detector import make_detect_handler
 
         version = os.environ.get("DETECTOR_MODEL_VERSION", "speciesnet-md_v5a.0.1")
         if backend == "fake":
-            from .fake import FakeDetector
+            from .fake import FakeDetector, synthetic_aware
 
             model = FakeDetector(fake_delay)
-        else:
-            from .detector import SpeciesNetDetectorModel
+            return synthetic_aware(make_detect_handler(model, storage, version), stage, model, version)
+        from .detector import SpeciesNetDetectorModel
 
-            model = SpeciesNetDetectorModel(SPECIESNET_MODEL)
+        model = SpeciesNetDetectorModel(SPECIESNET_MODEL)
         return make_detect_handler(model, storage, version)
 
     if stage == "classify":
@@ -35,13 +35,13 @@ def build_handler(stage: str, backend: str, storage):
 
         version = os.environ.get("CLASSIFIER_MODEL_VERSION", "speciesnet-v4.0.3a")
         if backend == "fake":
-            from .fake import FakeClassifier
+            from .fake import FakeClassifier, synthetic_aware
 
             model = FakeClassifier(fake_delay)
-        else:
-            from .classifier import SpeciesNetClassifierModel
+            return synthetic_aware(make_classify_handler(model, storage, version), stage, model, version)
+        from .classifier import SpeciesNetClassifierModel
 
-            model = SpeciesNetClassifierModel(SPECIESNET_MODEL, geofence=True)
+        model = SpeciesNetClassifierModel(SPECIESNET_MODEL, geofence=True)
         return make_classify_handler(model, storage, version)
 
     raise SystemExit(f"WORKER_STAGE must be 'detect' or 'classify', got {stage!r}")
@@ -58,7 +58,7 @@ def main() -> None:
 
     import redis
 
-    from .storage import Storage
+    from .storage import IoTimer, Storage
 
     stage = os.environ.get("WORKER_STAGE", "")
     backend = os.environ.get("MODEL_BACKEND", "speciesnet")
@@ -70,7 +70,9 @@ def main() -> None:
         torch.set_num_threads(int(os.environ.get("TORCH_NUM_THREADS", "2")))
 
     started = time.perf_counter()
-    handler = build_handler(stage, backend, Storage())
+    io_timer = IoTimer()  # storage reads/writes are timed into it: the task's fetchMs / uploadMs
+    storage = Storage(io_timer)
+    handler = build_handler(stage, backend, storage)
     log.info("%s worker ready: backend=%s, model load %.1fs, rss %.0f MB",
              stage, backend, time.perf_counter() - started, rss_mb())
 
@@ -79,6 +81,9 @@ def main() -> None:
         handler=handler,
         redis_client=redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379")),
         coordinator_url=os.environ.get("COORDINATOR_URL", "http://coordinator:3000"),
+        device=os.environ.get("WORKER_DEVICE", "cpu"),
+        io_timer=io_timer,
+        probe=storage.ping,  # the circuit breaker's check that MinIO is back
     )
     worker.run()
 

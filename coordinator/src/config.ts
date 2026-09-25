@@ -45,6 +45,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     dispatchIntervalMs: num(env, "DISPATCH_INTERVAL_MS", 200),
     reapIntervalMs: num(env, "REAP_INTERVAL_MS", 1000),
     dockerSocket: str(env, "DOCKER_SOCKET", "/var/run/docker.sock"),
+    // Docker `die`/`oom` events are the fast failure detector. "auto" = on when the coordinator can
+    // see the Docker socket and find its own Compose project; "off" = heartbeats only.
+    dockerEvents: str(env, "DOCKER_EVENTS", "auto"),
+    // Override for the Compose project whose containers we watch (normally read from our own
+    // container's `com.docker.compose.project` label).
+    composeProject: str(env, "COMPOSE_PROJECT", ""),
+
+    // Retry hygiene: full-jitter backoff before a failed task is re-dispatched,
+    // delay = random(0, min(RETRY_MAX_MS, RETRY_BASE_MS * 2^(taskErrors-1))).
+    retryBaseMs: num(env, "RETRY_BASE_MS", 500),
+    retryMaxMs: num(env, "RETRY_MAX_MS", 30000),
+    maxPauseMs: num(env, "MAX_PAUSE_MS", 120000),
+
+    // Telemetry (GET /system and the websocket `system` message).
+    claimMode: str(env, "CLAIM_MODE", "hybrid"),
+    modelBackend: str(env, "MODEL_BACKEND", "speciesnet"),
+    systemIntervalMs: num(env, "SYSTEM_INTERVAL_MS", 500),
+    invariantIntervalMs: num(env, "INVARIANT_INTERVAL_MS", 5000),
+    maxSyntheticTasks: num(env, "MAX_SYNTHETIC_TASKS", 1_000_000),
   };
 }
 

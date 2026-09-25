@@ -85,7 +85,8 @@ const REUSE_MS = 50 * 60 * 1000;
 const signed = new Map<string, { url: string; at: number }>();
 
 export async function presign(key: string | null | undefined): Promise<string | null> {
-  if (!key) return null;
+  // Synthetic benchmark images (POST /jobs/synthetic) have no object behind them.
+  if (!key || key.startsWith("synthetic/")) return null;
   const now = Date.now();
   const hit = signed.get(key);
   if (hit && now - hit.at < REUSE_MS) return hit.url;

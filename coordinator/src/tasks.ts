@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { getPool, query, tx, type Db } from "./db.js";
 import { hub, recordEvents, type EventInput, type EventRow } from "./events.js";
 import { getRedis, keys } from "./redis.js";
+import { telemetry } from "./telemetry.js";
 import {
   categorize,
   enqueueClassify,
@@ -17,7 +18,15 @@ import {
 // Task state machine (PRD 6.1):
 //
 //   PENDING --claim--> LEASED --complete--> SUCCEEDED
-//   LEASED --lease expired / worker dead / fail--> PENDING (attempts+1)  or  FAILED (attempts >= MAX)
+//   LEASED --fail / lease lost--> PENDING (attempts+1)  or  FAILED (attempts >= MAX)
+//   LEASED --fail {nonRetryable}--> FAILED
+//   LEASED --release / deregister / lost to our own kill or pause--> PENDING (no attempt)
+//   FAILED --redrive (DLQ)--> PENDING (counters reset)
+//
+// Retry accounting (docs/decisions/p1-coordinator.md): `attempts` = task_errors + lease_losses and
+// is the only counter checked against MAX_ATTEMPTS. `releases` counts free returns: infrastructure
+// errors the worker reported through /release, graceful exits, and leases lost because the
+// coordinator itself SIGKILLed or paused the worker (chaos, the Kill/Pause buttons).
 //
 // Every transition is ONE guarded UPDATE: `... WHERE id = $1 AND state = '<expected>'` (plus
 // `AND lease_epoch = $n` for anything a worker sends). If the row isn't in the expected state the
@@ -129,7 +138,10 @@ export async function claimConfirm(workerId: string, taskIds: string[]): Promise
   if (refused.length > 0) await requeueWaiting(refused);
 
   publish(rows, []);
-  if (leases.length > 0) hub.workersChanged();
+  if (leases.length > 0) {
+    telemetry.recordClaimed(leases.map((l) => l.taskId), workerId);
+    hub.workersChanged();
+  }
   return leases;
 }
 
@@ -137,18 +149,18 @@ export async function claimConfirm(workerId: string, taskIds: string[]): Promise
  * Puts back IDs whose task is PENDING and marked queued (i.e. it should be in a ready queue).
  * They were at the head of the queue when the worker took them, so they go back to the head.
  */
-export async function requeueWaiting(taskIds: string[]): Promise<number> {
+export async function requeueWaiting(taskIds: string[]): Promise<string[]> {
   const ids = taskIds.filter(isUuid);
-  if (ids.length === 0) return 0;
+  if (ids.length === 0) return [];
   const { rows } = await query(
     `select id, stage from tasks where id = any($1::uuid[]) and state = 'PENDING' and queued`,
     [ids],
   );
-  if (rows.length === 0) return 0;
+  if (rows.length === 0) return [];
   const pipe = getRedis().pipeline();
   for (const r of rows) pipe.lpush(keys.queue(r.stage), r.id);
   await pipe.exec();
-  return rows.length;
+  return rows.map((r) => r.id as string);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -204,15 +216,89 @@ async function rejectStale(taskId: string, workerId: string, leaseEpoch: number,
     },
   ]);
   publish(events, []);
+  telemetry.recordStale(taskId, workerId, leaseEpoch, rows[0].lease_epoch);
   await lremProcessing(workerId, [taskId]);
   return { status: "stale" };
+}
+
+/** Worker-measured phase timings sent with `complete` (CONTRACTS.md "Worker protocol v2"). */
+export interface WorkerTimings {
+  claimMs: number;
+  fetchMs: number;
+  inferMs: number;
+  uploadMs: number;
+}
+
+/** Telemetry must never cost a result: anything malformed is simply not stored. */
+export function parseTimings(raw: unknown): WorkerTimings | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const out = {} as WorkerTimings;
+  for (const k of ["claimMs", "fetchMs", "inferMs", "uploadMs"] as const) {
+    const v = r[k] === undefined ? 0 : Number(r[k]);
+    if (!Number.isFinite(v) || v < 0) return null;
+    out[k] = Math.round(v * 10) / 10;
+  }
+  return out;
+}
+
+const ms = (d: Date | null | undefined) => (d ? new Date(d).getTime() : null);
+
+interface Timeline {
+  pending_at: Date;
+  not_before: Date | null;
+  eligible_at: Date | null;
+  pushed_at: Date | null;
+  started_at: Date;
+}
+
+/**
+ * Turns the timestamps the fenced UPDATE returned plus the worker's own timings into one
+ * waterfall sample (definitions in docs/CONTRACTS.md, system.timings):
+ *   ready    = became PENDING, or its retry backoff ended
+ *   eligible = the dispatcher could have pushed it (not held back by the queue target/backpressure)
+ *   dispatchWaitMs = pushed − eligible                   (orchestration: tick delay + push)
+ *   queueWaitMs    = (eligible − ready) + (claimed − pushed)   (backlog in Postgres + wait in Redis)
+ *   totalMs        = complete handled − ready
+ */
+function timingSample(
+  stage: "detect" | "classify",
+  row: Timeline,
+  worker: WorkerTimings | null,
+  completeMs: number,
+  end: number,
+) {
+  const ready = Math.max(ms(row.pending_at)!, ms(row.not_before) ?? 0);
+  const pushed = ms(row.pushed_at);
+  const eligible = Math.min(pushed ?? Infinity, Math.max(ready, ms(row.eligible_at) ?? ready));
+  const claimed = ms(row.started_at)!;
+  return {
+    at: end,
+    stage,
+    dispatchWaitMs: pushed !== null ? Math.max(0, pushed - eligible) : 0,
+    queueWaitMs: pushed !== null ? Math.max(0, eligible - ready) + Math.max(0, claimed - pushed) : 0,
+    claimMs: worker?.claimMs ?? 0,
+    fetchMs: worker?.fetchMs ?? 0,
+    inferMs: worker?.inferMs ?? 0,
+    uploadMs: worker?.uploadMs ?? 0,
+    completeMs,
+    totalMs: Math.max(0, end - ready),
+    serviceMs: Math.max(0, end - claimed),
+  };
 }
 
 /**
  * LEASED → SUCCEEDED, fenced on lease_epoch, then stores the result and moves the image forward
  * (finalise it, or create its classify task) in the same transaction.
  */
-export async function completeTask(taskId: string, workerId: string, leaseEpoch: number, result: unknown): Promise<Outcome> {
+export async function completeTask(
+  taskId: string,
+  workerId: string,
+  leaseEpoch: number,
+  result: unknown,
+  rawTimings?: unknown,
+): Promise<Outcome> {
+  const startedAt = performance.now();
   if (!isUuid(taskId)) return { status: "not_found" };
   const epoch = Number(leaseEpoch);
   if (!Number.isInteger(epoch)) throw new ValidationError("leaseEpoch must be an integer");
@@ -223,14 +309,16 @@ export async function completeTask(taskId: string, workerId: string, leaseEpoch:
   const stage: "detect" | "classify" = peek[0].stage;
   const parsed = stage === "detect" ? parseDetections(result) : parseClassification(result);
   checkModelVersion(stage, (result as any)?.modelVersion);
+  const timings = parseTimings(rawTimings);
 
   const fx: Effects = { events: [], jobs: new Set() };
   const outcome = await tx(async (c) => {
     const { rows } = await c.query(
-      `update tasks set state = 'SUCCEEDED', finished_at = now(), lease_expires_at = null, queued = false
+      `update tasks set state = 'SUCCEEDED', finished_at = now(), lease_expires_at = null, queued = false,
+                        timings = $3
         where id = $1 and state = 'LEASED' and lease_epoch = $2
-        returning image_id, worker_id`,
-      [taskId, epoch],
+        returning image_id, worker_id, pending_at, not_before, eligible_at, pushed_at, started_at`,
+      [taskId, epoch, timings ? JSON.stringify(timings) : null],
     );
     if (rows.length === 0) return null;
     const { image_id: imageId, worker_id: holder } = rows[0];
@@ -265,13 +353,18 @@ export async function completeTask(taskId: string, workerId: string, leaseEpoch:
       const done = await maybeFinishJob(c, finalised);
       if (done) fx.events.push(done);
     }
-    return commitEffects(c, fx);
+    return { events: await commitEffects(c, fx), timeline: rows[0], finalised: finalised !== null };
   });
 
   if (outcome === null) return rejectStale(taskId, workerId, epoch, "complete");
   await lremProcessing(workerId, [taskId]);
-  publish(outcome, fx.jobs);
+  publish(outcome.events, fx.jobs);
   hub.workersChanged();
+
+  const end = Date.now();
+  const completeMs = Math.round((performance.now() - startedAt) * 10) / 10;
+  telemetry.recordCompletion(timingSample(stage, outcome.timeline, timings, completeMs, end), taskId);
+  if (outcome.finalised) telemetry.recordFinalized(1);
   return { status: "ok" };
 }
 
@@ -293,10 +386,15 @@ interface RetriedRow {
  */
 export async function finalizeFailed(c: pg.PoolClient, failed: RetriedRow[], fx: Effects) {
   const jobIds = new Set<string>();
+  let finalised = 0;
   for (const t of failed) {
     const jobId = await finalizeImage(c, t.image_id, "failed");
-    if (jobId) jobIds.add(jobId);
+    if (jobId) {
+      jobIds.add(jobId);
+      finalised++;
+    }
   }
+  telemetry.recordFinalized(finalised);
   for (const jobId of [...jobIds].sort()) {
     fx.jobs.add(jobId);
     const done = await maybeFinishJob(c, jobId);
@@ -304,8 +402,26 @@ export async function finalizeFailed(c: pg.PoolClient, failed: RetriedRow[], fx:
   }
 }
 
-/** Worker-reported failure: counts as an attempt, like a lost lease. */
-export async function failTask(taskId: string, workerId: string, leaseEpoch: number, error: unknown): Promise<Outcome> {
+let random = Math.random;
+
+/** Test hook: make the backoff jitter deterministic. Pass nothing to restore Math.random. */
+export function setJitterSource(fn?: () => number) {
+  random = fn ?? Math.random;
+}
+
+/**
+ * Worker-reported task error: counts as an attempt. A retryable error goes back to PENDING with a
+ * full-jitter backoff (not_before = now + random(0, min(cap, base * 2^previousErrors))), so a task
+ * that fails fast doesn't bounce straight back onto the same broken path. A non-retryable one
+ * (e.g. an undecodable image) goes straight to FAILED, i.e. to the DLQ.
+ */
+export async function failTask(
+  taskId: string,
+  workerId: string,
+  leaseEpoch: number,
+  error: unknown,
+  nonRetryable = false,
+): Promise<Outcome> {
   if (!isUuid(taskId)) return { status: "not_found" };
   const epoch = Number(leaseEpoch);
   if (!Number.isInteger(epoch)) throw new ValidationError("leaseEpoch must be an integer");
@@ -313,16 +429,27 @@ export async function failTask(taskId: string, workerId: string, leaseEpoch: num
 
   const fx: Effects = { events: [], jobs: new Set() };
   const outcome = await tx(async (c) => {
-    const { rows } = await c.query<RetriedRow & { worker_id: string }>(
-      `update tasks t
+    const { rows } = await c.query<RetriedRow & { worker_id: string; retry_in_ms: number | null }>(
+      `with old as (select id, worker_id, task_errors from tasks where id = $1),
+       decided as (
+         select old.*, (not $5::boolean and t.attempts + 1 < $3) as retry
+           from old join tasks t on t.id = old.id
+       )
+       update tasks t
           set attempts = t.attempts + 1,
-              state = case when t.attempts + 1 < $3 then 'PENDING' else 'FAILED' end,
-              finished_at = case when t.attempts + 1 < $3 then null else now() end,
+              task_errors = t.task_errors + 1,
+              state = case when d.retry then 'PENDING' else 'FAILED' end,
+              finished_at = case when d.retry then null else now() end,
+              pending_at = now(),
+              not_before = case when d.retry
+                                then now() + ($6::float8 * least($7::float8, $8::float8 * power(2, d.task_errors)))
+                                             * interval '1 millisecond' end,
               queued = false, worker_id = null, lease_expires_at = null, error = $4
-         from (select id, worker_id from tasks where id = $1) old
-        where t.id = $1 and t.id = old.id and t.state = 'LEASED' and t.lease_epoch = $2
-        returning t.id, t.stage, t.state, t.attempts, t.image_id, old.worker_id`,
-      [taskId, epoch, config.maxAttempts, message],
+         from decided d
+        where t.id = d.id and t.state = 'LEASED' and t.lease_epoch = $2
+        returning t.id, t.stage, t.state, t.attempts, t.image_id, d.worker_id,
+                  (extract(epoch from (t.not_before - now())) * 1000)::int as retry_in_ms`,
+      [taskId, epoch, config.maxAttempts, message, nonRetryable, random(), config.retryMaxMs, config.retryBaseMs],
     );
     if (rows.length === 0) return null;
     const t = rows[0];
@@ -332,7 +459,13 @@ export async function failTask(taskId: string, workerId: string, leaseEpoch: num
       type: "failed",
       taskId,
       workerId: t.worker_id,
-      detail: { final: t.state === "FAILED", attempts: t.attempts, error: message },
+      detail: {
+        final: t.state === "FAILED",
+        attempts: t.attempts,
+        error: message,
+        nonRetryable,
+        ...(t.retry_in_ms !== null ? { retryInMs: t.retry_in_ms } : {}),
+      },
     });
     if (t.state === "FAILED") await finalizeFailed(c, [t], fx);
     return commitEffects(c, fx);
@@ -346,33 +479,97 @@ export async function failTask(taskId: string, workerId: string, leaseEpoch: num
 }
 
 /**
- * Reaper transition: every LEASED task whose lease expired or whose worker is no longer ALIVE
- * goes back to PENDING (attempts+1) or to FAILED once attempts run out. One statement; rows a
- * concurrent complete/claim is holding are skipped (SKIP LOCKED) and picked up next pass.
+ * Worker-reported infrastructure error (MinIO down, a timeout): the task is fine, the path to it
+ * isn't. Back to PENDING without spending an attempt; fenced like complete/fail.
  */
-export async function requeueLostLeases(): Promise<{ requeued: number; failed: number }> {
+export async function releaseTask(taskId: string, workerId: string, leaseEpoch: number, reason: unknown): Promise<Outcome> {
+  if (!isUuid(taskId)) return { status: "not_found" };
+  const epoch = Number(leaseEpoch);
+  if (!Number.isInteger(epoch)) throw new ValidationError("leaseEpoch must be an integer");
+  const why = String(reason ?? "released").slice(0, 500);
+
+  const rows = await tx(async (c) => {
+    const { rows } = await c.query(
+      `update tasks set state = 'PENDING', releases = releases + 1, pending_at = now(),
+                        queued = false, worker_id = null, lease_expires_at = null
+        where id = $1 and state = 'LEASED' and lease_epoch = $2
+        returning stage`,
+      [taskId, epoch],
+    );
+    if (rows.length === 0) return null;
+    return recordEvents(c, [{ type: "released", taskId, workerId, detail: { reason: why, stage: rows[0].stage } }]);
+  });
+
+  if (rows === null) return rejectStale(taskId, workerId, epoch, "release");
+  await lremProcessing(workerId, [taskId]);
+  publish(rows, []);
+  hub.workersChanged();
+  return { status: "ok" };
+}
+
+export interface Requeued {
+  id: string;
+  stage: string;
+  oldWorker: string | null;
+  workerGone: boolean;
+  /** True when the coordinator itself killed or paused the worker: no attempt was charged. */
+  induced: boolean;
+}
+
+/**
+ * Reaper / death-watch transition: LEASED tasks whose lease expired, or whose worker is no longer
+ * ALIVE, go back to PENDING or, once attempts run out, to FAILED. One statement; rows a concurrent
+ * complete/claim is holding are skipped (SKIP LOCKED) and picked up next pass.
+ *
+ * - `workerIds` limits the sweep to those workers (the death path recovers exactly the dead ones).
+ * - `graceMs` extends every lease by the reaper's own recent stall, so a coordinator that froze
+ *   doesn't blame workers for heartbeats it failed to process.
+ * - A lease lost because the coordinator itself killed or paused the worker is not the task's
+ *   fault: it costs a release, not an attempt. A kill ends the incarnation, so every lease that
+ *   incarnation held is ours (killed_at >= registered_at; a task can be claimed in the few hundred
+ *   ms between our stamp and the container actually dying). A pause covers tasks started before
+ *   it ended (started_at <= paused_until, for a pause of this incarnation).
+ */
+export async function requeueLostLeases(
+  opts: { workerIds?: string[]; graceMs?: number } = {},
+): Promise<{ requeued: number; failed: number; tasks: Requeued[] }> {
   const fx: Effects = { events: [], jobs: new Set() };
   const result = await tx(async (c) => {
-    const { rows } = await c.query<RetriedRow & { old_worker: string | null; worker_gone: boolean }>(
+    const { rows } = await c.query<
+      RetriedRow & { old_worker: string | null; worker_gone: boolean; induced: boolean }
+    >(
       `with lost as (
-         select t.id, t.worker_id as old_worker, (w.status is distinct from 'ALIVE') as worker_gone
+         select t.id, t.worker_id as old_worker, (w.status is distinct from 'ALIVE') as worker_gone,
+                coalesce(w.killed_at >= w.registered_at, false)
+                  or coalesce(w.paused_at >= w.registered_at and t.started_at <= w.paused_until, false) as induced
            from tasks t left join workers w on w.id = t.worker_id
-          where t.state = 'LEASED' and (t.lease_expires_at < now() or w.status is distinct from 'ALIVE')
+          where t.state = 'LEASED'
+            and ($3::text[] is null or t.worker_id = any($3::text[]))
+            and (t.lease_expires_at < now() - ($2::int * interval '1 millisecond')
+                 or w.status is distinct from 'ALIVE')
           for update of t skip locked
+       ),
+       decided as (
+         select lost.*, (lost.induced or t.attempts + 1 < $1) as retry
+           from lost join tasks t on t.id = lost.id
        )
        update tasks t
-          set attempts = t.attempts + 1,
-              state = case when t.attempts + 1 < $1 then 'PENDING' else 'FAILED' end,
-              finished_at = case when t.attempts + 1 < $1 then null else now() end,
-              error = case when t.attempts + 1 < $1 then t.error
-                           else 'lease lost ' || (t.attempts + 1) || ' times' end,
+          set attempts     = t.attempts + (not d.induced)::int,
+              lease_losses = t.lease_losses + (not d.induced)::int,
+              releases     = t.releases + d.induced::int,
+              state = case when d.retry then 'PENDING' else 'FAILED' end,
+              finished_at = case when d.retry then null else now() end,
+              error = case when d.retry then t.error
+                           else 'lease lost (attempt ' || (t.attempts + 1) || '/' || $1 || ')'
+                                || coalesce('; last task error: ' || t.error, '') end,
+              pending_at = now(),
               queued = false, worker_id = null, lease_expires_at = null
-         from lost
-        where t.id = lost.id and t.state = 'LEASED'
-        returning t.id, t.stage, t.state, t.attempts, t.image_id, lost.old_worker, lost.worker_gone`,
-      [config.maxAttempts],
+         from decided d
+        where t.id = d.id and t.state = 'LEASED'
+        returning t.id, t.stage, t.state, t.attempts, t.image_id, d.old_worker, d.worker_gone, d.induced`,
+      [config.maxAttempts, Math.max(0, Math.round(opts.graceMs ?? 0)), opts.workerIds ?? null],
     );
-    if (rows.length === 0) return { requeued: 0, failed: 0, events: [] as EventRow[] };
+    if (rows.length === 0) return { requeued: 0, failed: 0, tasks: [] as Requeued[], events: [] as EventRow[] };
 
     const perWorker = new Map<string, number>();
     for (const t of rows) {
@@ -388,7 +585,7 @@ export async function requeueLostLeases(): Promise<{ requeued: number; failed: n
           type: t.worker_gone ? "reassigned" : "lease_expired",
           taskId: t.id,
           workerId: t.old_worker,
-          detail: { attempts: t.attempts, stage: t.stage },
+          detail: { attempts: t.attempts, stage: t.stage, charged: !t.induced },
         });
       }
       if (t.worker_gone && t.old_worker) perWorker.set(t.old_worker, (perWorker.get(t.old_worker) ?? 0) + 1);
@@ -402,11 +599,14 @@ export async function requeueLostLeases(): Promise<{ requeued: number; failed: n
     for (const j of jobs) fx.jobs.add(j.job_id);
     const failed = rows.filter((r) => r.state === "FAILED");
     await finalizeFailed(c, failed, fx);
-    return { requeued: rows.length - failed.length, failed: failed.length, events: await commitEffects(c, fx) };
+    const tasks: Requeued[] = rows
+      .filter((r) => r.state === "PENDING")
+      .map((r) => ({ id: r.id, stage: r.stage, oldWorker: r.old_worker, workerGone: r.worker_gone, induced: r.induced }));
+    return { requeued: tasks.length, failed: failed.length, tasks, events: await commitEffects(c, fx) };
   });
   publish(result.events, fx.jobs);
   if (result.requeued + result.failed > 0) hub.workersChanged();
-  return { requeued: result.requeued, failed: result.failed };
+  return { requeued: result.requeued, failed: result.failed, tasks: result.tasks };
 }
 
 /**
@@ -418,7 +618,8 @@ export async function releaseWorkerTasks(workerId: string, reason: string): Prom
   const fx: Effects = { events: [], jobs: new Set() };
   const rows = await tx(async (c) => {
     const { rows } = await c.query(
-      `update tasks set state = 'PENDING', queued = false, worker_id = null, lease_expires_at = null
+      `update tasks set state = 'PENDING', releases = releases + 1, pending_at = now(),
+                        queued = false, worker_id = null, lease_expires_at = null
         where worker_id = $1 and state = 'LEASED'
         returning id, stage`,
       [workerId],
@@ -427,5 +628,22 @@ export async function releaseWorkerTasks(workerId: string, reason: string): Prom
     return commitEffects(c, fx);
   });
   publish(rows, []);
+  return rows.length;
+}
+
+/**
+ * Write-behind for tasks.complete_ms: the coordinator's handling time of a complete is only known
+ * after its transaction commits, so it is buffered in memory and written here in one statement
+ * per second instead of costing every completion a second round trip.
+ */
+export async function flushCompleteTimings(): Promise<number> {
+  const rows = telemetry.drainCompleteMs();
+  if (rows.length === 0) return 0;
+  await query(
+    `update tasks t set complete_ms = v.ms
+       from unnest($1::uuid[], $2::real[]) as v(id, ms)
+      where t.id = v.id`,
+    [rows.map((r) => r[0]), rows.map((r) => r[1])],
+  );
   return rows.length;
 }
