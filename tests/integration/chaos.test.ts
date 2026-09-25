@@ -9,7 +9,6 @@ import { aliveWorkers, api, db, getJob, REDIS_URL, sleep, startStack, waitFor, w
 
 const IMAGES = Number(process.env.CHAOS_IMAGES ?? 300);
 const pool = db();
-const redis = new Redis(REDIS_URL);
 
 beforeAll(async () => {
   await startStack(4, 2);
@@ -20,7 +19,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await pool.end();
-  redis.disconnect();
 });
 
 describe("chaos: SIGKILL workers mid-job", () => {
@@ -39,6 +37,7 @@ describe("chaos: SIGKILL workers mid-job", () => {
     // (like a process frozen by a GC pause or a network partition).
     const reg = await api("POST", "/workers/register", { stage: "detect", hostname: "stale-test", containerId: "stale-test" });
     staleWorkerId = reg.body.workerId;
+    const redis = new Redis(REDIS_URL);
     await waitFor(async () => {
       const id = await redis.blmove("queue:detect", `processing:${staleWorkerId}`, "LEFT", "RIGHT", 1);
       if (!id) return false;
@@ -49,6 +48,7 @@ describe("chaos: SIGKILL workers mid-job", () => {
       staleEpoch = lease.leaseEpoch;
       return true;
     }, 60_000, "stale worker to lease a task", 0);
+    await redis.quit();
   });
 
   it("kills 2 busy workers once the job is underway", async () => {

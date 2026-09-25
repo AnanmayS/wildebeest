@@ -128,7 +128,7 @@ export function createApp() {
   });
 
   app.post("/workers/:id/heartbeat", async (req, res) => {
-    const ok = await heartbeat(req.params.id, req.body?.metrics);
+    const ok = await heartbeat(req.params.id, req.body?.metrics, req.body?.taskIds);
     if (!ok) return res.status(410).json({ error: "WORKER_DEAD" });
     res.json({ ok: true });
   });

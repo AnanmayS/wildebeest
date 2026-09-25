@@ -133,7 +133,10 @@ export async function claimConfirm(workerId: string, taskIds: string[]): Promise
   return leases;
 }
 
-/** RPUSHes back IDs whose task is PENDING and marked queued (i.e. it should be in a ready queue). */
+/**
+ * Puts back IDs whose task is PENDING and marked queued (i.e. it should be in a ready queue).
+ * They were at the head of the queue when the worker took them, so they go back to the head.
+ */
 export async function requeueWaiting(taskIds: string[]): Promise<number> {
   const ids = taskIds.filter(isUuid);
   if (ids.length === 0) return 0;
@@ -143,7 +146,7 @@ export async function requeueWaiting(taskIds: string[]): Promise<number> {
   );
   if (rows.length === 0) return 0;
   const pipe = getRedis().pipeline();
-  for (const r of rows) pipe.rpush(keys.queue(r.stage), r.id);
+  for (const r of rows) pipe.lpush(keys.queue(r.stage), r.id);
   await pipe.exec();
   return rows.length;
 }

@@ -201,6 +201,22 @@ describe("leases, retries and the reaper", () => {
     expect(again?.leaseEpoch).toBe(2);
   });
 
+  it("puts recovered work at the head of the queue, ahead of new tasks", async () => {
+    const { jobId } = await makeJob(Array.from({ length: config.detectQueueTarget + 3 }, (_, i) => `img${i}`));
+    await dispatchOnce();
+    const w = await registerTestWorker("detect", "w1");
+    const lease = await pullAndClaim(w, "detect");
+    await expireLease(lease!.taskId);
+    await reapOnce();
+
+    // The queue is still full of new work, but the retry is pushed anyway, to the front.
+    expect((await dispatchOnce()).retried).toBe(1);
+    const queue = await getRedis().lrange(keys.queue("detect"), 0, -1);
+    expect(queue[0]).toBe(lease!.taskId);
+    expect(queue).toHaveLength(config.detectQueueTarget);
+    expect((await tasksOfJob(jobId)).filter((t) => t.queued)).toHaveLength(config.detectQueueTarget);
+  });
+
   it("moves a task to FAILED after MAX_ATTEMPTS and finalises the image as failed", async () => {
     const { jobId, taskId } = await oneDetectTask();
     const w = await registerTestWorker("detect", "w1");
@@ -235,7 +251,7 @@ describe("leases, retries and the reaper", () => {
     await query(`update tasks set lease_expires_at = now() + interval '50 milliseconds' where id = $1`, [taskId]);
     const before = new Date((await task(taskId)).lease_expires_at).getTime();
 
-    expect(await heartbeat(w, { tasksDone: 0, rssMb: 100 })).toBe(true);
+    expect(await heartbeat(w, { tasksDone: 0, rssMb: 100 }, [taskId])).toBe(true);
     const after = new Date((await task(taskId)).lease_expires_at).getTime();
     expect(after).toBeGreaterThan(before + config.leaseMs / 2);
     expect(await getRedis().pttl(keys.alive(w))).toBeGreaterThan(0);
@@ -243,6 +259,19 @@ describe("leases, retries and the reaper", () => {
     await new Promise((r) => setTimeout(r, 100));
     expect((await reapOnce()).requeued).toBe(0);
     expect(await task(taskId)).toMatchObject({ state: "LEASED" });
+  });
+
+  it("does not renew a lease the worker no longer reports, so an abandoned task gets reassigned", async () => {
+    const { taskId } = await oneDetectTask();
+    const w = await registerTestWorker("detect", "w1");
+    await pullAndClaim(w, "detect");
+    await query(`update tasks set lease_expires_at = now() + interval '50 milliseconds' where id = $1`, [taskId]);
+
+    // The worker is alive and heartbeating, but it has dropped this task.
+    expect(await heartbeat(w, {}, [])).toBe(true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect((await reapOnce()).requeued).toBe(1);
+    expect(await task(taskId)).toMatchObject({ state: "PENDING", attempts: 1 });
   });
 
   it("marks silent workers DEAD, reassigns their tasks, and drains their processing list", async () => {

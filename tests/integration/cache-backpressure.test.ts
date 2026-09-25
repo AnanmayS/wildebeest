@@ -2,7 +2,9 @@
 //  1. Resubmitting the same 300 images completes with 100% cache hits in under 2 seconds.
 //  2. Backpressure engages with 1 classifier and 6 detectors, visible in logs and metrics.
 //     With the default watermarks (500/200) a 300-image job never builds a 500-deep classify
-//     queue, so this test restarts the coordinator with low watermarks (20/5).
+//     queue, so this test restarts the coordinator with low watermarks (20/5). Six real detectors
+//     don't fit in an 8 GB Docker VM, and backpressure is coordinator logic, so the workers use the
+//     fake model backend here (fixed 300 ms per task, deterministic results, separate model versions).
 import { afterAll, describe, expect, it } from "vitest";
 import { api, compose, db, sleep, startStack, waitForJobDone } from "./helpers";
 
@@ -11,13 +13,13 @@ const pool = db();
 
 afterAll(async () => {
   await pool.end();
-  // Put the coordinator back on its default watermarks.
-  compose("up -d --no-deps --force-recreate coordinator");
+  // Put the coordinator and workers back on their defaults (real models, default watermarks).
+  compose("up -d --force-recreate --scale detector=3 --scale classifier=1");
 });
 
 describe("content-hash cache", () => {
   it("reruns an already-processed batch with 100% cache hits in under 2s", async () => {
-    await startStack(4, 2);
+    await startStack(3, 1);
     // Make sure every image has results (a no-op if an earlier test already processed them).
     const first = await api("POST", "/jobs/sample", { size: IMAGES, countryCode: "TZA" });
     await waitForJobDone(first.body.jobId);
@@ -36,7 +38,14 @@ describe("content-hash cache", () => {
 
 describe("backpressure", () => {
   it("throttles stage 1 when the classify queue passes the high-water mark", async () => {
-    const env = { CLASSIFY_QUEUE_HIGH_WATER: "20", CLASSIFY_QUEUE_LOW_WATER: "5" };
+    const env = {
+      CLASSIFY_QUEUE_HIGH_WATER: "20",
+      CLASSIFY_QUEUE_LOW_WATER: "5",
+      MODEL_BACKEND: "fake",
+      DETECTOR_MODEL_VERSION: "fake-detector-v1",
+      CLASSIFIER_MODEL_VERSION: "fake-classifier-v1",
+    };
+    compose("rm -sf detector classifier");
     compose("up -d --no-deps --force-recreate coordinator", env);
     await startStack(6, 1, env);
     await api("POST", "/admin/clear-cache");

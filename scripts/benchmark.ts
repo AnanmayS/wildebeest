@@ -1,6 +1,7 @@
 // Phase 6 benchmark harness.
 //
-// For each detector count in BENCH_DETECTORS (default 1,2,4,6,8), with classifiers at about
+// For each detector count in BENCH_DETECTORS (default 1,2,3,4 — what fits an 8 GB Docker VM;
+// use BENCH_DETECTORS=1,2,4,6,8 with ~16 GB for Docker), with classifiers at about
 // 1 per 3 detectors (minimum 1), it clears the result cache, runs a fixed BENCH_IMAGES-image
 // sample job, and records wall time, throughput, p50/p95 per-image processing latency and peak
 // container memory. Then it measures recovery time after a SIGKILL and the cache-hit rerun time.
@@ -18,7 +19,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = path.join(ROOT, "benchmarks");
 const API = process.env.COORDINATOR_URL ?? "http://localhost:3000";
 const IMAGES = Number(process.env.BENCH_IMAGES ?? 1000);
-const DETECTORS = (process.env.BENCH_DETECTORS ?? "1,2,4,6,8").split(",").map(Number);
+const DETECTORS = (process.env.BENCH_DETECTORS ?? "1,2,3,4").split(",").map(Number);
 const RECOVERY_DETECTORS = Number(process.env.BENCH_RECOVERY_DETECTORS ?? 4);
 const RECOVERY_IMAGES = Number(process.env.BENCH_RECOVERY_IMAGES ?? 300);
 const pool = new pg.Pool({

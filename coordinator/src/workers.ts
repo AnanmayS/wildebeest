@@ -3,7 +3,7 @@ import { query } from "./db.js";
 import { hub } from "./events.js";
 import { getRedis, keys } from "./redis.js";
 import { presign } from "./storage.js";
-import { releaseWorkerTasks, requeueWaiting, ValidationError } from "./tasks.js";
+import { isUuid, releaseWorkerTasks, requeueWaiting, ValidationError } from "./tasks.js";
 
 export type Stage = "detect" | "classify";
 export const STAGES: Stage[] = ["detect", "classify"];
@@ -70,8 +70,14 @@ export async function registerWorker(body: { stage?: unknown; hostname?: unknown
  * Liveness + lease renewal. Returns false if the worker is not ALIVE (declared dead or stopped):
  * the API turns that into 410 WORKER_DEAD and the worker must drop its work and re-register.
  */
-export async function heartbeat(workerId: string, metrics: unknown): Promise<boolean> {
+/**
+ * Liveness + lease renewal. Only the leases the worker says it still holds are renewed: a task it
+ * gave up on (e.g. its /complete retries ran out during a coordinator outage) is not in `taskIds`,
+ * so its lease runs out and the reaper hands it to someone else instead of it staying LEASED forever.
+ */
+export async function heartbeat(workerId: string, metrics: unknown, taskIds: unknown = []): Promise<boolean> {
   const m = metrics && typeof metrics === "object" ? metrics : {};
+  const held = Array.isArray(taskIds) ? taskIds.filter(isUuid) : [];
   const { rowCount } = await query(
     `update workers set last_heartbeat_at = now(), metrics = $2 where id = $1 and status = 'ALIVE'`,
     [workerId, JSON.stringify(m)],
@@ -79,8 +85,8 @@ export async function heartbeat(workerId: string, metrics: unknown): Promise<boo
   if (!rowCount) return false;
   await query(
     `update tasks set lease_expires_at = now() + ($2::int * interval '1 millisecond')
-      where worker_id = $1 and state = 'LEASED'`,
-    [workerId, config.leaseMs],
+      where worker_id = $1 and state = 'LEASED' and id = any($3::uuid[])`,
+    [workerId, config.leaseMs, held],
   );
   await setAlive(workerId);
   hub.workersChanged();

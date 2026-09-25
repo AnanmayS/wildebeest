@@ -43,6 +43,17 @@ describe("dispatcher", () => {
     expect(await getRedis().llen(keys.queue("detect"))).toBe(config.detectQueueTarget);
   });
 
+  it("rebuilds the queues from Postgres when Redis loses its data", async () => {
+    const { jobId } = await makeJob(["a", "b", "c"]);
+    await dispatchOnce();
+    expect(await getRedis().llen(keys.queue("detect"))).toBe(3);
+
+    await getRedis().flushdb(); // Redis restarted without persistence
+    await dispatchOnce();
+    const ids = (await tasksOfJob(jobId)).map((t) => t.id);
+    expect(await getRedis().lrange(keys.queue("detect"), 0, -1)).toEqual(ids);
+  });
+
   it("applies backpressure with hysteresis on queue:classify", async () => {
     const redis = getRedis();
     await makeJob(["a", "b", "c"]);

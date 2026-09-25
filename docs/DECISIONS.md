@@ -23,7 +23,7 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
    `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT`) so the stack doesn't collide with a local Postgres or Redis.
    Inside the Compose network services still use 5432 / 6379.
 9. **Coordinator: worker IDs are `{stage}-{hostname}`.** If the same ID registers again (the worker process restarted), whatever the previous incarnation held is released back to `PENDING` (no attempt cost) and its `processing:` list is drained before it can claim again.
-10. **Coordinator: a heartbeat renews every `LEASED` task of that worker**, not only the `taskIds` it reports. Simpler and never expires a lease the worker is still working on; a worker that loses track of a task still loses it once it stops heartbeating.
+10. **Coordinator: a heartbeat renews only the leases in the `taskIds` the worker reports.** (Originally it renewed every `LEASED` task of that worker; changed because a task a live worker had given up on — e.g. its `/complete` retries ran out during a coordinator outage — would then stay `LEASED` forever and the job could never finish. Now that lease simply expires and the reaper reassigns it.)
 11. **Coordinator: claim-confirm from a non-`ALIVE` worker, or for the other stage's task, leases nothing** (200 with `leases: []`, per the contract's "absent" rule) and RPUSHes the IDs back if they are still waiting. The worker learns it was declared dead from its next heartbeat (410).
 12. **Coordinator: graceful releases (deregister, re-register) don't count as attempts** and write a `released` task_event, which the event log doesn't show. Only lease expiry, worker death and `/fail` count.
 13. **Coordinator: categories come from the stored result.** Results are `INSERT ... ON CONFLICT DO NOTHING` and then read back; the image is categorised from the kept row, not the submitted one, so `images.final_category` always agrees with `detection_results`. Partial cache hits are used too: a cached detection with no cached classification marks the image `cache_hit` and creates only the classify task; a detect completion whose photo was already classified (another job) finalises without a classify task.
@@ -83,8 +83,8 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
 30. **Worker: batch claims.** The first ID is claimed with `BLMOVE ... 1` (1 s block); extra IDs up to
    `claimBatchSize` use `BLMOVE ... 0.05` so a worker never waits to fill a batch. On SIGTERM or 410 the
    remaining unstarted leases are simply not processed: deregister (or the reaper) returns them to `PENDING`.
-   On 410 the in-flight result is discarded without calling `/complete`, and the main loop re-registers under a
-   new workerId. `/complete`, `/fail` and heartbeats retry up to 5 times on connection errors only;
+   On 410 the in-flight result is discarded without calling `/complete`, and the main loop re-registers (worker IDs
+   are `{stage}-{hostname}`, so it gets the same ID back; the coordinator releases anything the old incarnation held). `/complete`, `/fail` and heartbeats retry up to 5 times on connection errors only;
    `/workers/register` retries for up to 120 s at startup.
 31. **Worker memory, latency and capacity (measured).** In the linux/arm64 image on Docker Desktop (Apple M2,
    8 vCPU, 8 GB), `python -m forgegrid_worker.measure`, `TORCH_NUM_THREADS=2`:
@@ -123,3 +123,21 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
    the M2; 640 px is ~2.5× faster with equal accuracy on a 400-image check (93.8% vs 91.5% empty-vs-animal,
    one fewer animal found out of 111). The size is part of `DETECTOR_MODEL_VERSION` (`…-640`), so switching
    sizes never reuses cached results from the other size.
+36. **Retries jump the queue.** The first chaos run measured ~2 min from a kill until the dead worker's task
+   was re-claimed, because the reassigned task was RPUSHed behind ~50 queued tasks. Tasks that were already started
+   (`started_at` set) are now LPUSHed to the head of their queue and bypass both `DETECT_QUEUE_TARGET` and
+   backpressure, since that work was admitted before its worker died. Processing-list drains also go to the head.
+37. **Default demo scale is 3 detectors + 1 classifier.** In the first chaos run (4 detectors + 2 classifiers on an
+   8 GB Docker VM that also runs other projects' containers) one detector was OOM-killed at its 2 GB limit. The system
+   recovered it like any other death, but the demo default stays within memory.
+38. **Backpressure test uses the fake model backend.** Phase 4 asks for backpressure with 6 detectors and
+   1 classifier; six real detectors (~1.1 GB each) don't fit this 8 GB Docker VM. Backpressure is coordinator logic
+   (queue depth → dispatcher), so `cache-backpressure.test.ts` runs the workers with `MODEL_BACKEND=fake` and separate
+   fake model versions. The pipeline, chaos and cache tests use the real models.
+39. **Benchmark sweep defaults to 1, 2, 3, 4 detectors.** The PRD sweep (1, 2, 4, 6, 8) needs ~15 GB for Docker.
+   On this 8-vCPU / 8 GB VM, 4 detectors × 2 torch threads already saturate the CPU, so the flattening point is visible.
+   `BENCH_DETECTORS=1,2,4,6,8` runs the full sweep on a bigger machine.
+40. **Redis data loss is detected and repaired without a restart.** Whenever the queues are built from Postgres the
+   coordinator sets `forgegrid:queues-built`. Each dispatcher tick checks it; if it is gone (Redis restarted without
+   persistence, or was flushed), the dispatcher runs the same rebuild as startup: clear the ready queues and mark every
+   `PENDING` task unqueued so it is pushed again. Duplicate IDs this may create are harmless.
