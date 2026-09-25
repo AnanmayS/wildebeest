@@ -1,0 +1,52 @@
+import type { Chaos, Config, GalleryImage, JobSummary, TaskEvent, Worker } from './types';
+
+// Every call goes through the same-origin /api prefix (nginx in prod, Vite proxy in dev).
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/api${path}`, init);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+const postJson = <T>(path: string, body: unknown) =>
+  request<T>(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+export const api = {
+  listJobs: () => request<{ jobs: JobSummary[] }>('/jobs').then((r) => r.jobs),
+  getJob: (id: string) => request<JobSummary>(`/jobs/${id}`),
+  startSample: (size: number) => postJson<{ jobId: string }>('/jobs/sample', { size }),
+  listWorkers: () => request<{ workers: Worker[] }>('/workers').then((r) => r.workers),
+  killWorker: (id: string) => postJson<{ ok: boolean }>(`/workers/${id}/kill`, {}),
+  getChaos: () => request<Chaos>('/chaos'),
+  setChaos: (chaos: Chaos) => postJson<Chaos>('/chaos', chaos),
+  getMetrics: () => request<{ throttled?: boolean; queues?: { classify?: number } }>('/metrics'),
+  getConfig: () => request<Partial<Config>>('/config'),
+  /** Recent events, newest first — seeds the event log after a reload or reconnect. */
+  listEvents: (limit = 200) => request<{ events: TaskEvent[] }>(`/events?limit=${limit}`).then((r) => r.events),
+
+  listImages: (jobId: string, q: { category?: string; species?: string; page: number; pageSize: number }) => {
+    const params = new URLSearchParams({ page: String(q.page), pageSize: String(q.pageSize) });
+    if (q.category) params.set('category', q.category);
+    if (q.species) params.set('species', q.species);
+    return request<{ images: GalleryImage[]; total: number; page: number }>(`/jobs/${jobId}/images?${params}`);
+  },
+};
+
+/** Multipart upload (field `files`). Uses XHR so we can show upload progress for big batches. */
+export function uploadPhotos(files: File[], onProgress: (fraction: number) => void): Promise<{ jobId: string }> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    for (const f of files) form.append('files', f, f.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/jobs');
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
+      else reject(new Error(`Upload failed (${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error('Upload failed (network)'));
+    xhr.send(form);
+  });
+}

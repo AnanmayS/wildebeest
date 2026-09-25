@@ -1,0 +1,100 @@
+@import "tailwindcss";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* One restrained palette: near-black greens for surfaces, then a single accent per meaning. */
+@theme {
+  --font-sans: "Space Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", monospace;
+
+  --color-ink-950: #070a08;
+  --color-ink-900: #0d1210;
+  --color-ink-850: #111815;
+  --color-ink-800: #18211d;
+  --color-ink-700: #243029;
+  --color-ink-600: #3a4841;
+  --color-ink-500: #5f6e66;
+  --color-ink-400: #859389;
+  --color-ink-300: #aab6af;
+  --color-ink-100: #e8eee9;
+
+  --color-leaf-300: #a6efb6;  /* healthy, animals */
+  --color-leaf-400: #7ddc93;
+  --color-leaf-600: #2f8a4a;
+  --color-ember-300: #ffa097; /* dead, kill */
+  --color-ember-400: #ff6b5e;
+  --color-ember-600: #b8322a;
+  --color-sun-300: #ffd48a;   /* throttled, reassigned */
+  --color-sun-400: #f5b33d;
+  --color-sky-400: #86b7e8;   /* people & vehicles, cache */
+  --color-dust-400: #8f8a7c;  /* empty frames */
+  --color-violet-400: #b69cff;/* fencing: stale result rejected */
+
+  --animate-slide-in: slide-in 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-death: death 1.6s ease-out;
+  --animate-pulse-dot: pulse-dot 1.4s ease-in-out infinite;
+  --animate-scan: scan 1.2s linear infinite;
+  --animate-rise: rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(-8px); background-color: rgb(255 255 255 / 0.06); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes death {
+    0% { background-color: rgb(255 107 94 / 0.55); box-shadow: 0 0 0 6px rgb(255 107 94 / 0.35); }
+    15% { background-color: rgb(255 107 94 / 0.15); }
+    30% { background-color: rgb(255 107 94 / 0.45); box-shadow: 0 0 0 3px rgb(255 107 94 / 0.25); }
+    100% { box-shadow: 0 0 0 0 rgb(255 107 94 / 0); }
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  @keyframes scan {
+    from { transform: translateY(-100%); }
+    to { transform: translateY(100%); }
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+  }
+}
+
+@layer base {
+  html { color-scheme: dark; }
+  body {
+    @apply bg-ink-950 text-ink-100 font-sans antialiased;
+    background-image: radial-gradient(1200px 600px at 10% -10%, rgb(125 220 147 / 0.07), transparent 60%);
+    background-attachment: fixed;
+  }
+  ::selection { background: rgb(125 220 147 / 0.3); }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-ink-800 bg-ink-900/80;
+  }
+  .eyebrow {
+    @apply text-[11px] font-medium uppercase tracking-[0.14em] text-ink-400;
+  }
+  .btn {
+    @apply inline-flex h-9 items-center gap-2 rounded-lg border px-3.5 text-sm font-medium transition
+      disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-ghost { @apply border-ink-700 bg-ink-850 text-ink-100 hover:border-ink-600 hover:bg-ink-800; }
+  .btn-primary { @apply border-leaf-400 bg-leaf-400 text-ink-950 hover:bg-leaf-300; }
+}
+
+@utility tabular { font-variant-numeric: tabular-nums; }
+
+/* Thin, dark scrollbars inside panels. */
+.scroll-thin { scrollbar-width: thin; scrollbar-color: var(--color-ink-700) transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+
+@keyframes shimmer {
+  from { background-position: -200px 0; }
+  to { background-position: calc(100% + 200px) 0; }
+}

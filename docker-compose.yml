@@ -1,0 +1,134 @@
+x-model-env: &model-env
+  # speciesnet 5.0.5, model kaggle:google/speciesnet/pyTorch/v4.0.3a/1 (detector: MegaDetector md_v5a.0.1)
+  DETECTOR_MODEL_VERSION: ${DETECTOR_MODEL_VERSION:-speciesnet-md_v5a.0.1}
+  CLASSIFIER_MODEL_VERSION: ${CLASSIFIER_MODEL_VERSION:-speciesnet-v4.0.3a}
+  MODEL_BACKEND: ${MODEL_BACKEND:-speciesnet}
+  TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-2}
+
+x-worker: &worker
+  build: ./worker
+  image: forgegrid-worker:latest
+  restart: "no"
+  depends_on:
+    coordinator:
+      condition: service_healthy
+  volumes:
+    - model-cache:/models
+  stop_grace_period: 12s
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: forgegrid
+      POSTGRES_USER: forgegrid
+      POSTGRES_PASSWORD: forgegrid
+    ports: ["${POSTGRES_HOST_PORT:-15432}:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgegrid"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7
+    ports: ["${REDIS_HOST_PORT:-16379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
+  minio:
+    image: pgsty/minio  # maintained MinIO fork; the official minio/minio image is no longer pullable
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/data]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      retries: 30
+
+  coordinator:
+    build: ./coordinator
+    environment:
+      <<: *model-env
+      PORT: 3000
+      DATABASE_URL: postgres://forgegrid:forgegrid@postgres:5432/forgegrid
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: forgegrid
+      SAMPLE_DIR: /data/sample
+      LEASE_MS: ${LEASE_MS:-15000}
+      HEARTBEAT_MS: ${HEARTBEAT_MS:-2000}
+      WORKER_TIMEOUT_MS: ${WORKER_TIMEOUT_MS:-6000}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      CLAIM_BATCH_SIZE: ${CLAIM_BATCH_SIZE:-1}
+      ANIMAL_CONF_THRESHOLD: ${ANIMAL_CONF_THRESHOLD:-0.2}
+      CLASSIFY_QUEUE_HIGH_WATER: ${CLASSIFY_QUEUE_HIGH_WATER:-500}
+      CLASSIFY_QUEUE_LOW_WATER: ${CLASSIFY_QUEUE_LOW_WATER:-200}
+      DETECT_QUEUE_TARGET: ${DETECT_QUEUE_TARGET:-50}
+      DEFAULT_COUNTRY: ${DEFAULT_COUNTRY:-TZA}
+      HUMAN_REVIEW_SECONDS_PER_IMAGE: ${HUMAN_REVIEW_SECONDS_PER_IMAGE:-3}
+    ports: ["3000:3000"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/sample:/data/sample:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      retries: 60
+
+  detector:
+    <<: *worker
+    environment:
+      <<: *model-env
+      WORKER_STAGE: detect
+      COORDINATOR_URL: http://coordinator:3000
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: forgegrid
+      FAKE_MODEL_DELAY_MS: ${FAKE_MODEL_DELAY_MS:-300}
+    deploy:
+      resources:
+        limits:
+          memory: ${DETECTOR_MEM_LIMIT:-1500m}
+
+  classifier:
+    <<: *worker
+    environment:
+      <<: *model-env
+      WORKER_STAGE: classify
+      COORDINATOR_URL: http://coordinator:3000
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: forgegrid
+      FAKE_MODEL_DELAY_MS: ${FAKE_MODEL_DELAY_MS:-300}
+    deploy:
+      resources:
+        limits:
+          memory: ${CLASSIFIER_MEM_LIMIT:-2000m}
+
+  dashboard:
+    build: ./dashboard
+    ports: ["8080:80"]
+    depends_on:
+      coordinator: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  miniodata:
+  model-cache:

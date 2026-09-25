@@ -8,9 +8,9 @@ change a contract, change it here and note it in docs/DECISIONS.md.
 
 | Service     | Image/build     | Port (host) | Notes |
 |-------------|-----------------|-------------|-------|
-| postgres    | postgres:16     | 5432        | db `forgegrid`, user/pass `forgegrid`/`forgegrid` |
-| redis       | redis:7         | 6379        | |
-| minio       | minio/minio     | 9000, 9001  | user/pass `minioadmin`/`minioadmin`, bucket `forgegrid` (coordinator creates it at startup) |
+| postgres    | postgres:16     | 15432       | db `forgegrid`, user/pass `forgegrid`/`forgegrid` |
+| redis       | redis:7         | 16379       | host ports moved off 5432/6379, which are commonly taken |
+| minio       | pgsty/minio     | 9000, 9001  | user/pass `minioadmin`/`minioadmin`, bucket `forgegrid` (coordinator creates it at startup) |
 | coordinator | ./coordinator   | 3000        | mounts `/var/run/docker.sock` and `./data/sample:/data/sample:ro` |
 | detector    | ./worker        | none        | `WORKER_STAGE=detect`, scalable, `restart: "no"` |
 | classifier  | ./worker        | none        | `WORKER_STAGE=classify`, scalable, `restart: "no"` |
@@ -39,13 +39,16 @@ FAKE_MODEL_DELAY_MS=300                     # worker, fake backend only
 
 ## Model version strings
 
-- Detector results use the worker-reported `modelVersion`, e.g. `megadetector-v5a` plus the
-  speciesnet package version: `"speciesnet-4.0.1/md_v5a"`. The fake backend reports `"fake-detector-v1"`.
-- Classifier results: `"speciesnet-4.0.1/v4.0.1a"`-style string, fake backend `"fake-classifier-v1"`.
 - The coordinator needs the detector model version *before* any worker runs (for the cache
   check at job creation). Rule: the coordinator reads `DETECTOR_MODEL_VERSION` and
-  `CLASSIFIER_MODEL_VERSION` env vars; the worker uses the same env vars as its reported
-  version, so the two always agree. Compose sets them once in an `x-model-env` anchor.
+  `CLASSIFIER_MODEL_VERSION` env vars; the worker reports the same env var as its `modelVersion`,
+  so the two always agree. Compose sets them once in the `x-model-env` anchor
+  (defaults `speciesnet-md_v5a.0.1` / `speciesnet-v4.0.3a`, matching speciesnet 5.0.5's default model; the worker agent should update the defaults
+  in docker-compose.yml to match the installed speciesnet package/model). When running with
+  `MODEL_BACKEND=fake`, also set `DETECTOR_MODEL_VERSION=fake-detector-v1` and
+  `CLASSIFIER_MODEL_VERSION=fake-classifier-v1` so fake results never pollute the real cache.
+- The coordinator stores results under its own env version (it trusts env, and ignores a mismatched
+  worker-reported version except to log a warning).
 
 ## Object storage keys (bucket `forgegrid`)
 
@@ -180,6 +183,8 @@ URLs are presigned against `S3_PUBLIC_ENDPOINT`.
 (ms from a worker's DEAD mark — and from its kill time when killed via the API — until all its reassigned tasks were
 re-claimed by live workers), p50/p95 per-image latency (image created → finalised).
 `GET /healthz` → `{ "ok": true }`
+`POST /admin/clear-cache` → `{ "ok": true, "deleted": { "detection": n, "classification": n } }` — deletes all rows from
+`detection_results` and `classification_results` (benchmark + integration tests use it; images/tasks are kept).
 
 ## WebSocket `/events` (dashboard connects to `/api/events`)
 
@@ -194,3 +199,19 @@ never drop `task_event`s the event log shows — batch them instead):
 ```
 Event log types shown: `worker_died`, `reassigned`, `lease_expired`, `stale_rejected`, `cache_hit`
 (one aggregated message per job, e.g. "300 cache hits"), `throttled`, `unthrottled`, `failed`, `job_done`.
+
+## Additions (after the dashboard build)
+
+- **Stable image URLs.** Presigned URLs for a given object key are cached in memory by the coordinator for
+  ~50 min (sign with a 1 h expiry) so repeated `worker_update`s carry the same URL and the browser doesn't refetch.
+- `GET /events?limit=200` → `{ "events": [ …same shape as the task_events message items… ] }`, newest first,
+  so the event log is populated after a reload/reconnect.
+- **Kill events.** `POST /workers/:id/kill` and chaos kills write a `worker_killed` task_event (task_id NULL,
+  worker_id set, message "SIGKILL sent to detect-a1b2 (chaos)") and push it immediately.
+- **JobSummary** gains `"sampleSize": 1000 | null`, `"throttled": boolean`, `"classifyQueue": number`.
+- **Workers** gain `"registeredAt"` and `"diedAt"` (null unless DEAD); list sorted by stage, then registeredAt.
+- `GET /config` → `{ "animalConfThreshold": 0.2, "heartbeatMs": 2000, "workerTimeoutMs": 6000, "leaseMs": 15000,
+  "humanReviewSecondsPerImage": 3 }`.
+- `GET /metrics` shape (minimum): `{ "throttled": bool, "queues": { "detect": n, "classify": n },
+  "workers": { "alive": n, "dead": n }, "recoveryMs": [n…], "latency": { "p50": ms, "p95": ms } }`.
+- `/jobs/:id/images` ordering: most recently finalised first; `pageSize` default 48, max 200.
