@@ -1,0 +1,4 @@
+# Host-side scripts: download_sample.py, baseline.py, plot_benchmark.py
+speciesnet==5.0.5
+requests
+matplotlib

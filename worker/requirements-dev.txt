@@ -1,0 +1,8 @@
+# Test deps for `make test-worker` (installed into the repo-root .venv).
+# The unit tests never load model weights, so speciesnet/torch are not needed.
+pytest
+fakeredis>=2.20
+boto3
+redis>=5
+requests
+pillow

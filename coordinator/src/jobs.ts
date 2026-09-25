@@ -6,7 +6,7 @@ import { query, tx } from "./db.js";
 import { isThrottled } from "./dispatcher.js";
 import { hub, recordEvents, type EventInput } from "./events.js";
 import { getRedis, keys } from "./redis.js";
-import { categorize, maybeFinishJob, type Category, type ClassificationRow, type Detection } from "./results.js";
+import { categorize, categorizeSpecies, maybeFinishJob, type Category, type ClassificationRow, type Detection } from "./results.js";
 import { imageKey, presign, putIfMissing } from "./storage.js";
 
 // ---------------------------------------------------------------------------------------------
@@ -89,7 +89,10 @@ export async function createJob(opts: {
     const category = categorize(det);
     if (category !== "animal") return { ...p, final: category, task: null };
     const cls = clsBySha.get(input.sha256);
-    if (cls) return { ...p, final: "animal", species: cls, task: null };
+    if (cls) {
+      const final = categorizeSpecies(cls);
+      return { ...p, final, species: final === "animal" ? cls : null, task: null };
+    }
     return { ...p, task: "classify" };
   });
 

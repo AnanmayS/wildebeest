@@ -1,0 +1,6 @@
+# Worker runtime deps. torch/torchvision are installed first from the CPU-only
+# wheel index in the Dockerfile, so pip sees them as already satisfied here.
+speciesnet==5.0.5
+boto3
+redis>=5
+requests

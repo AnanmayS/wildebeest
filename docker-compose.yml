@@ -1,9 +1,12 @@
 x-model-env: &model-env
   # speciesnet 5.0.5, model kaggle:google/speciesnet/pyTorch/v4.0.3a/1 (detector: MegaDetector md_v5a.0.1)
-  DETECTOR_MODEL_VERSION: ${DETECTOR_MODEL_VERSION:-speciesnet-md_v5a.0.1}
+  DETECTOR_MODEL_VERSION: ${DETECTOR_MODEL_VERSION:-speciesnet-md_v5a.0.1-640}
   CLASSIFIER_MODEL_VERSION: ${CLASSIFIER_MODEL_VERSION:-speciesnet-v4.0.3a}
   MODEL_BACKEND: ${MODEL_BACKEND:-speciesnet}
   TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-2}
+  # 640 is ~2.5x faster on CPU than 1280 at the same accuracy on this data (see DECISIONS).
+  # If you change it, change DETECTOR_MODEL_VERSION too so cached results aren't reused.
+  DETECTOR_IMG_SIZE: ${DETECTOR_IMG_SIZE:-640}
 
 x-worker: &worker
   build: ./worker
@@ -103,7 +106,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${DETECTOR_MEM_LIMIT:-1500m}
+          memory: ${DETECTOR_MEM_LIMIT:-2000m}
 
   classifier:
     <<: *worker
@@ -120,7 +123,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${CLASSIFIER_MEM_LIMIT:-2000m}
+          memory: ${CLASSIFIER_MEM_LIMIT:-1300m}
 
   dashboard:
     build: ./dashboard

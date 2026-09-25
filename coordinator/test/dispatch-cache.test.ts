@@ -7,7 +7,7 @@ import { getPool, query } from "../src/db.js";
 import { dispatchOnce, isThrottled } from "../src/dispatcher.js";
 import { jobSummary, listSample, orderSample, parseCsv } from "../src/jobs.js";
 import { getRedis, keys } from "../src/redis.js";
-import { categorize, enqueueClassify, storeDetection } from "../src/results.js";
+import { categorize, categorizeSpecies, enqueueClassify, storeDetection } from "../src/results.js";
 import { completeTask } from "../src/tasks.js";
 import {
   classifyResult,
@@ -199,6 +199,13 @@ describe("categorisation and sample selection", () => {
     expect(categorize([{ label: "human", conf: 0.99, bbox: [] }, { label: "animal", conf: 0.2, bbox: [] }], t)).toBe(
       "animal",
     );
+  });
+
+  it("lets a 'blank' species classification overrule the detector", () => {
+    const row = { label: "f1e1…;;;;;;blank", confidence: 0.9, cropKey: null };
+    expect(categorizeSpecies({ ...row, commonName: "blank" })).toBe("empty");
+    expect(categorizeSpecies({ ...row, commonName: "plains zebra" })).toBe("animal");
+    expect(categorizeSpecies(null)).toBe("animal");
   });
 
   it("parses quoted CSV", () => {
