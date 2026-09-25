@@ -1,23 +1,32 @@
 import { useRef, useState } from 'react';
 import { uploadPhotos } from '../lib/api';
-import type { Connection } from '../hooks/useWildebeest';
+import type { Connection, LiveJob } from '../hooks/useWildebeest';
+import type { Chaos } from '../lib/types';
+import { fmtDuration, fmtInt } from '../lib/format';
+import { useNow } from '../hooks/useNow';
+import { ChaosControl } from './ChaosControl';
 import { Logo } from './Logo';
 
-const SIZES = [500, 1000, 2000];
+const SIZES = [300, 1000, 2000];
 
 interface Props {
   connection: Connection;
-  lastSampleSize: number | null;
+  job: LiveJob | null;
+  chaos: Chaos;
+  onChaos: (next: Chaos) => void;
   onStartSample: (size: number) => Promise<void>;
   onUploaded: (jobId: string) => Promise<void>;
   onError: (message: string) => void;
 }
 
-export function Header({ connection, lastSampleSize, onStartSample, onUploaded, onError }: Props) {
+/** Title, the active job at a glance, and every demo control that isn't on a worker lane. */
+export function Header({ connection, job, chaos, onChaos, onStartSample, onUploaded, onError }: Props) {
   const [size, setSize] = useState(1000);
   const [starting, setStarting] = useState(false);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  // Prefer the explicit field; older coordinators only encode it in the name ("sample-1000").
+  const lastSampleSize = job ? (job.sampleSize ?? (Number(job.name.match(/^sample-(\d+)$/)?.[1]) || null)) : null;
 
   const run = async (n: number) => {
     setStarting(true);
@@ -45,36 +54,37 @@ export function Header({ connection, lastSampleSize, onStartSample, onUploaded, 
   };
 
   return (
-    <header className="flex items-center justify-between gap-6">
-      <div className="flex min-w-0 items-center gap-4">
+    <header className="flex h-[52px] items-center gap-5">
+      <div className="flex shrink-0 items-center gap-3">
         <Logo />
-        <div className="min-w-0">
-          <div className="flex items-baseline gap-3">
-            <h1 className="text-[26px] font-semibold leading-none tracking-tight">Wildebeest</h1>
+        <div>
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-[22px] font-semibold leading-none tracking-tight">Wildebeest</h1>
             <ConnectionPill connection={connection} />
           </div>
-          <p className="mt-1.5 max-w-[600px] text-[13px] leading-snug text-ink-400">
-            {PITCH}
-          </p>
+          <p className="mt-1 text-[12.5px] leading-none text-ink-400">Fault-tolerant distributed camera-trap pipeline</p>
         </div>
       </div>
 
+      <JobStrip job={job} />
+
       <div className="flex shrink-0 items-center gap-2">
+        <ChaosControl chaos={chaos} onChange={onChaos} />
         <input ref={fileInput} type="file" accept="image/jpeg,image/png" multiple hidden onChange={(e) => upload(e.target.files)} />
-        <button className="btn btn-ghost" disabled={uploadPct !== null} onClick={() => fileInput.current?.click()}>
+        <button className="btn btn-ghost px-2.5" disabled={uploadPct !== null} onClick={() => fileInput.current?.click()} title="Upload your own photos">
           <UploadIcon />
-          {uploadPct === null ? 'Upload photos' : `Uploading ${Math.round(uploadPct * 100)}%`}
+          {uploadPct === null ? <span className="sr-only">Upload photos</span> : `${Math.round(uploadPct * 100)}%`}
         </button>
         <button
           className="btn btn-ghost"
           disabled={!lastSampleSize || starting}
           onClick={() => lastSampleSize && run(lastSampleSize)}
-          title="Re-submit the same photos: every image is a content-hash cache hit"
+          title="Submit the same photos again: every one is a content-hash cache hit and finalises without inference"
         >
           <RerunIcon />
-          Rerun same batch
+          Rerun (cache)
         </button>
-        <div className="ml-2 flex items-center rounded-lg border border-ink-700 bg-ink-850 p-0.5">
+        <div className="flex items-center rounded-lg border border-ink-700 bg-ink-850 p-0.5">
           <label className="sr-only" htmlFor="sample-size">Sample size</label>
           <select
             id="sample-size"
@@ -83,13 +93,11 @@ export function Header({ connection, lastSampleSize, onStartSample, onUploaded, 
             className="h-8 cursor-pointer appearance-none rounded-md bg-transparent pl-3 pr-2 text-sm font-medium tabular text-ink-100 outline-none"
           >
             {SIZES.map((n) => (
-              <option key={n} value={n} className="bg-ink-900">
-                {n.toLocaleString()} photos
-              </option>
+              <option key={n} value={n} className="bg-ink-900">{n.toLocaleString()} photos</option>
             ))}
           </select>
           <button className="btn btn-primary h-8" disabled={starting} onClick={() => run(size)}>
-            {starting ? 'Starting…' : 'Load sample dataset'}
+            {starting ? 'Starting…' : 'Load sample'}
           </button>
         </div>
       </div>
@@ -97,8 +105,37 @@ export function Header({ connection, lastSampleSize, onStartSample, onUploaded, 
   );
 }
 
-const PITCH =
-  'Upload 1,000 trail-cam photos, and a cluster of workers sorts them into “empty” and “41 zebras, 12 lions, 8 elephants” — even if a machine dies halfway through.';
+/** The active job in one line: name, progress bar coloured by outcome, count and clock. */
+function JobStrip({ job }: { job: LiveJob | null }) {
+  const now = useNow(500);
+  if (!job) return <div className="min-w-0 flex-1 text-[13px] text-ink-500">No job yet: load a sample to watch the pipeline work.</div>;
+  const running = job.status === 'running';
+  const elapsed = job.elapsedMs + (running ? now - job.receivedAt : 0);
+  const c = job.categories;
+  const total = job.total || 1;
+  const segs = [
+    { n: c.empty, cls: 'bg-dust-400/80', label: 'empty' },
+    { n: c.animal, cls: 'bg-leaf-400', label: 'animal' },
+    { n: c.human + c.vehicle, cls: 'bg-sky-400', label: 'people / vehicles' },
+    { n: c.failed, cls: 'bg-ember-400', label: 'failed' },
+  ];
+  return (
+    <a href="#results" className="group min-w-0 flex-1" title="Jump to the job's results">
+      <div className="flex items-baseline gap-2 text-[13px]">
+        <span className="truncate font-mono text-ink-300">{job.name}</span>
+        <span className={running ? 'text-leaf-400' : 'text-ink-400'}>{running ? 'running' : job.status}</span>
+        <span className="ml-auto shrink-0 tabular text-ink-300">
+          <b className="font-semibold text-ink-100">{fmtInt(job.processed)}</b> / {fmtInt(job.total)} · {fmtDuration(elapsed)}
+        </span>
+      </div>
+      <div className="mt-1.5 flex h-1.5 gap-[2px] overflow-hidden rounded-full bg-ink-800">
+        {segs.filter((s) => s.n > 0).map((s) => (
+          <span key={s.label} title={`${fmtInt(s.n)} ${s.label}`} className={`h-full ${s.cls} transition-[width] duration-700`} style={{ width: `${(s.n / total) * 100}%` }} />
+        ))}
+      </div>
+    </a>
+  );
+}
 
 function ConnectionPill({ connection }: { connection: Connection }) {
   const live = connection === 'live';
@@ -107,9 +144,9 @@ function ConnectionPill({ connection }: { connection: Connection }) {
       className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${
         live ? 'bg-leaf-400/10 text-leaf-400' : 'bg-sun-400/10 text-sun-400'
       }`}
-      title={live ? 'WebSocket connected' : 'WebSocket down — polling every 2s'}
+      title={live ? 'WebSocket connected' : 'WebSocket down: polling every 2 s'}
     >
-      <span className={`h-1.5 w-1.5 rounded-full ${live ? 'bg-leaf-400 animate-pulse-dot' : 'bg-sun-400'}`} />
+      <span className={`h-1.5 w-1.5 rounded-full ${live ? 'bg-leaf-400' : 'bg-sun-400'}`} />
       {live ? 'Live' : 'Polling'}
     </span>
   );

@@ -16,11 +16,15 @@ const STYLE: Record<string, { label: string; cls: string }> = {
   job_cancelled: { label: 'Cancelled', cls: 'text-ink-300 bg-ink-300/12' },
   chaos_on: { label: 'Chaos', cls: 'text-ember-300 bg-ember-400/8' },
   chaos_off: { label: 'Chaos', cls: 'text-ink-300 bg-ink-800' },
+  worker_paused: { label: 'Paused', cls: 'text-sun-300 bg-sun-400/12' },
+  worker_resumed: { label: 'Resumed', cls: 'text-ink-300 bg-ink-800' },
+  released: { label: 'Released', cls: 'text-ink-300 bg-ink-800' },
+  speculated: { label: 'Speculated', cls: 'text-sky-400 bg-sky-400/12' },
 };
 
 export function EventLog({ events }: { events: TaskEvent[] }) {
   return (
-    <section className="panel flex min-h-0 flex-1 flex-col">
+    <section className="card flex min-h-0 flex-1 flex-col">
       <div className="flex items-baseline justify-between px-5 pb-2 pt-4">
         <h2 className="text-lg font-semibold tracking-tight">Event log</h2>
         <span className="text-xs tabular text-ink-500">{events.length ? `${events.length} events` : ''}</span>

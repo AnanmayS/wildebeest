@@ -11,7 +11,7 @@ export function SpeciesLeaderboard({ species }: { species: JobSummary['species']
   const hidden = species.length - top.length;
 
   return (
-    <section className="panel px-5 pb-4 pt-4">
+    <section className="card px-5 pb-4 pt-4">
       <div className="flex items-baseline justify-between">
         <h2 className="text-lg font-semibold tracking-tight">Species</h2>
         <span className="text-xs text-ink-500">{species.length ? `${species.length} species${hidden > 0 ? ` · top ${ROWS} shown` : ''}` : ''}</span>

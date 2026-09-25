@@ -85,7 +85,7 @@ export function Gallery({ job, minBoxConf }: Props) {
   const to = Math.min(page * PAGE_SIZE, data.total);
 
   return (
-    <section className="panel px-5 pb-5 pt-4">
+    <section className="card px-5 pb-5 pt-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-baseline gap-3">
           <h2 className="text-lg font-semibold tracking-tight">Detections</h2>

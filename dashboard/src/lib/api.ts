@@ -1,11 +1,17 @@
-import type { Chaos, Config, GalleryImage, JobSummary, TaskEvent, Worker } from './types';
+import type { Benchmarks, Chaos, Config, GalleryImage, JobSummary, SystemSnapshot, TaskEvent, Worker } from './types';
 
 // Every call goes through the same-origin /api prefix (nginx in prod, Vite proxy in dev).
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, init);
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+    throw new ApiError(body.error ?? `${res.status} ${res.statusText}`, res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -19,9 +25,15 @@ export const api = {
   startSample: (size: number) => postJson<{ jobId: string }>('/jobs/sample', { size }),
   listWorkers: () => request<{ workers: Worker[] }>('/workers').then((r) => r.workers),
   killWorker: (id: string) => postJson<{ ok: boolean }>(`/workers/${id}/kill`, {}),
+  /** v2: `docker pause` for ms, then unpause. 409 NOT_A_CONTAINER for native workers. */
+  pauseWorker: (id: string, ms: number) => postJson<{ ok: boolean }>(`/workers/${id}/pause`, { ms }),
+  /** v2: the dashboard's main data. 404 on older coordinators. */
+  getSystem: () => request<SystemSnapshot>('/system'),
+  /** v2: benchmarks/summary.json. 404 until the benchmark harness has run. */
+  getBenchmarks: () => request<Benchmarks>('/benchmarks'),
   getChaos: () => request<Chaos>('/chaos'),
   setChaos: (chaos: Chaos) => postJson<Chaos>('/chaos', chaos),
-  getMetrics: () => request<{ throttled?: boolean; queues?: { classify?: number } }>('/metrics'),
+  getMetrics: () => request<{ throttled?: boolean; queues?: { detect?: number; classify?: number } }>('/metrics'),
   getConfig: () => request<Partial<Config>>('/config'),
   /** Recent events, newest first — seeds the event log after a reload or reconnect. */
   listEvents: (limit = 200) => request<{ events: TaskEvent[] }>(`/events?limit=${limit}`).then((r) => r.events),

@@ -7,12 +7,10 @@ import { Num } from './Num';
 
 interface Props {
   job: LiveJob | null;
-  throttled: boolean;
-  classifyQueue: number;
 }
 
 /** Progress bar + stats on top, the empty/animal/people funnel underneath. */
-export function JobPanel({ job, throttled, classifyQueue }: Props) {
+export function JobPanel({ job }: Props) {
   const now = useNow(250);
   const running = job?.status === 'running';
   const elapsed = job ? job.elapsedMs + (running ? now - job.receivedAt : 0) : 0;
@@ -22,7 +20,7 @@ export function JobPanel({ job, throttled, classifyQueue }: Props) {
   const pct = total ? (job!.processed / total) * 100 : 0;
 
   return (
-    <section className="panel px-6 pb-5 pt-4">
+    <section className="card px-6 pb-5 pt-4">
       <div className="flex items-end justify-between gap-6">
         <div>
           <div className="eyebrow flex items-center gap-2">
@@ -37,18 +35,16 @@ export function JobPanel({ job, throttled, classifyQueue }: Props) {
             )}
           </div>
           <div className="mt-1 flex items-baseline gap-3">
-            <Num value={job?.processed ?? 0} className="text-6xl font-semibold leading-none tracking-tight" />
+            <Num value={job?.processed ?? 0} className="text-5xl font-semibold leading-none tracking-tight" />
             <span className="text-2xl font-medium text-ink-500 tabular">/ {fmtInt(total)}</span>
             <span className="text-2xl font-medium text-ink-400 tabular">{job ? `${Math.floor(pct)}%` : ''}</span>
           </div>
         </div>
 
-        <dl className="flex items-end gap-8 pb-1">
+        <dl className="flex items-end gap-6 pb-1">
           <Stat label="Elapsed" value={fmtDuration(elapsed)} />
           <Stat label="Throughput" value={<Throughput value={running ? job!.throughput : 0} />} unit="img/s" />
           <Stat label="Cache hits" value={<Num value={job?.cacheHits ?? 0} />} />
-          <Stat label="Queued" value={job ? `${fmtInt(job.pending.detect)} · ${fmtInt(job.pending.classify)}` : '—'} unit="det · cls" />
-          <ThrottleBadge throttled={throttled} classifyQueue={classifyQueue} />
         </dl>
       </div>
 
@@ -88,24 +84,10 @@ function StatusTag({ status }: { status: 'running' | 'done' | 'cancelled' }) {
   if (status === 'running')
     return (
       <span className="inline-flex items-center gap-1.5 text-leaf-400">
-        <span className="h-1.5 w-1.5 rounded-full bg-leaf-400 animate-pulse-dot" /> Running
+        <span className="h-1.5 w-1.5 rounded-full bg-leaf-400" /> Running
       </span>
     );
   return <span className="text-ink-300">{status === 'done' ? 'Done' : 'Cancelled'}</span>;
-}
-
-function ThrottleBadge({ throttled, classifyQueue }: { throttled: boolean; classifyQueue: number }) {
-  return (
-    <div
-      className={`self-center rounded-lg border px-3 py-1.5 text-center transition-all duration-300 ${
-        throttled ? 'border-sun-400/60 bg-sun-400/10 text-sun-300' : 'border-ink-800 text-ink-600'
-      }`}
-      title="Backpressure: detect dispatch pauses while the classify queue is above its high-water mark"
-    >
-      <div className="text-[11px] font-semibold uppercase tracking-[0.14em]">{throttled ? 'Throttled' : 'Flowing'}</div>
-      <div className="text-[10px] tabular">{throttled ? `classify queue ${classifyQueue}` : 'no backpressure'}</div>
-    </div>
-  );
 }
 
 /** Segmented bar: each finished photo is coloured by its category, so the bar is also the funnel. */
@@ -129,9 +111,6 @@ function ProgressBar({ job }: { job: LiveJob | null }) {
           style={{ width: `${(s.n / total) * 100}%` }}
         />
       ))}
-      {job?.status === 'running' && (
-        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,transparent,rgb(255_255_255/0.08),transparent)] bg-[length:200px_100%] animate-[shimmer_1.6s_linear_infinite]" />
-      )}
     </div>
   );
 }

@@ -11,7 +11,8 @@ export function useTween(target: number, durationMs = 700): number {
     const start = performance.now();
     let frame = 0;
     const step = (now: number) => {
-      const t = Math.min(1, (now - start) / durationMs);
+      // rAF timestamps can precede the performance.now() taken above: clamp, or the ease-out overshoots wildly.
+      const t = Math.min(1, Math.max(0, (now - start) / durationMs));
       const eased = 1 - (1 - t) ** 3;
       current.current = from + (target - from) * eased;
       setValue(current.current);
