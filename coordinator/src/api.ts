@@ -19,6 +19,8 @@ import {
 } from "./jobs.js";
 import { clusterStatus } from "./leader.js";
 import { computeMetrics } from "./metrics.js";
+import { settled, withReportContext } from "./otel.js";
+import { httpMetrics, promHandler } from "./prom.js";
 import { systemSnapshot } from "./system.js";
 import {
   claimConfirm,
@@ -53,6 +55,7 @@ export function createApp() {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "5mb" }));
+  app.use(httpMetrics); // claim/complete/... handler latency for /metrics/prom
 
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true });
@@ -171,6 +174,9 @@ export function createApp() {
     res.json(await computeMetrics());
   });
 
+  // Prometheus exposition (RED per stage, queue/lease/worker gauges); scraped by otel-lgtm.
+  app.get("/metrics/prom", promHandler);
+
   app.get("/events", async (req, res) => {
     const limit = Math.min(1000, Math.max(1, Number(req.query.limit ?? 200) || 200));
     res.json({ events: await recentLogEvents(getPool(), limit) });
@@ -232,10 +238,12 @@ export function createApp() {
   });
 
   app.post("/tasks/:id/complete", async (req, res) => {
-    const { workerId, leaseEpoch, result, timings, next } = req.body ?? {};
+    const { workerId, leaseEpoch, result, timings, next, traceparent } = req.body ?? {};
     sendOutcome(
       res,
-      await completeTask(req.params.id, String(workerId ?? ""), leaseEpoch, result, timings, nextCount(next)),
+      await withReportContext(traceparent, () =>
+        completeTask(req.params.id, String(workerId ?? ""), leaseEpoch, result, timings, nextCount(next)),
+      ),
     );
   });
 
@@ -252,12 +260,20 @@ export function createApp() {
 
   app.post("/tasks/:id/fail", async (req, res) => {
     const { workerId, leaseEpoch, error, nonRetryable } = req.body ?? {};
-    sendOutcome(res, await failTask(req.params.id, String(workerId ?? ""), leaseEpoch, error, nonRetryable === true));
+    const outcome = await failTask(req.params.id, String(workerId ?? ""), leaseEpoch, error, nonRetryable === true);
+    void settled(req.params.id, leaseEpoch, "fail", outcome.status, req.body?.traceparent, {
+      "wildebeest.error": String(error ?? "").slice(0, 200),
+    });
+    sendOutcome(res, outcome);
   });
 
   app.post("/tasks/:id/release", async (req, res) => {
     const { workerId, leaseEpoch, reason } = req.body ?? {};
-    sendOutcome(res, await releaseTask(req.params.id, String(workerId ?? ""), leaseEpoch, reason));
+    const outcome = await releaseTask(req.params.id, String(workerId ?? ""), leaseEpoch, reason);
+    void settled(req.params.id, leaseEpoch, "release", outcome.status, req.body?.traceparent, {
+      "wildebeest.reason": String(reason ?? "").slice(0, 200),
+    });
+    sendOutcome(res, outcome);
   });
 
   // ---- errors ------------------------------------------------------------------------------

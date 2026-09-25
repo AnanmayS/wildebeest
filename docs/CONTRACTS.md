@@ -588,3 +588,57 @@ cluster; "since the coordinator started" now means since *that replica* started.
 **Leftover pauses.** The leader unpauses a worker container still paused more than 2 s after its injected pause
 should have ended (the replica timing it died). It no longer unpauses every paused container of the project at
 startup, and never touches a container that isn't a registered worker.
+
+## Observability refinements (2026-09-25)
+
+Tracing and Prometheus metrics (docs/decisions/o-observability.md). Every existing shape is unchanged;
+the additions are optional fields that old workers ignore and old coordinators never send.
+
+**Trace context**
+
+- `tasks.traceparent text null` (migration 009): the W3C trace context of the task's OpenTelemetry
+  PRODUCER span (`create detect` / `create classify`), written in the transaction that creates the task
+  (classify tasks: right after the detect completion commits, before the push). NULL when the coordinator
+  ran with tracing off; such a task is not traced.
+- Every Lease (claim-confirm, `/tasks/claim`, complete/complete-batch `leases`) gains
+  `"traceparent": "00-<trace>-<span>-<flags>" | null`. With coordinator tracing on it is the context of the
+  coordinator's `lease {stage}` span for this attempt (a child of the stored PRODUCER context, same trace);
+  with tracing off it is the stored value (null for untraced tasks). Workers parent their `process` span on
+  it; its flags carry the head-sampling decision, which workers follow (`parentbased_*`).
+- Span IDs of the PRODUCER span and of each attempt's `lease` span are derived from the task ID (and the
+  epoch): the first 16 hex of sha256(`<taskId>/create`) and sha256(`<taskId>/<epoch>`). Any HA replica can
+  therefore parent under or close a span another replica started; the lease span is emitted once, by the
+  replica that sees the attempt end (complete, fail, release, the leader's requeue), starting at the claim.
+- `POST /tasks/:id/complete`, `/fail`, `/release` accept an optional top-level `"traceparent"`, and each
+  `complete-batch` item an optional `"traceparent"`: the worker's `settle` span for that task. The
+  coordinator's per-task `complete {stage}` span is its child, so a batched complete still lands in each
+  task's own trace. Single-task reports may also send the `traceparent` HTTP header (the http
+  instrumentation then continues the trace); batched reports send none. Malformed values are ignored.
+
+**Environment**
+
+- Coordinator and workers: tracing is on only when `OTEL_EXPORTER_OTLP_ENDPOINT` (or
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is non-empty; standard `OTEL_TRACES_SAMPLER` /
+  `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*`, `OTEL_SERVICE_NAME` apply. The coordinator starts with
+  `node --import ./dist/otel-preload.js dist/index.js`; the preload does nothing when tracing is off.
+- Compose service `lgtm` (`grafana/otel-lgtm`, profile `observability`), ports `GRAFANA_PORT` (3300),
+  `OTLP_GRPC_PORT` (4317), `OTLP_HTTP_PORT` (4318), `TEMPO_PORT` (3200), `PROMETHEUS_PORT` (9090).
+  In-network OTLP endpoint: `http://lgtm:4318`.
+
+**Metrics**
+
+- `GET /metrics/prom`: Prometheus text format. `GET /metrics` (JSON) is unchanged. Series (all prefixed
+  `wildebeest_`): `tasks_completed_total{stage}`, `task_failures_total{stage,final}`,
+  `lease_expirations_total{stage,reason,charged}`, `stale_write_rejections_total`, `recoveries_total{via}`,
+  `recovery_seconds` (histogram), `cache_hits_total`, `images_submitted_total`,
+  `task_service_seconds{stage}` and `task_queue_wait_seconds{stage}` (histograms, same definitions as
+  `system.timings`), `http_request_duration_seconds{route,code}` (worker-protocol routes), gauges
+  `queue_depth{stage}`, `leases_in_flight{stage}`, `workers{stage,status}`, `throttled`,
+  `invariant_violations{kind}`, and per live worker from its last heartbeat
+  `worker_tasks_done`, `worker_rss_bytes`, `worker_avg_latency_seconds`, `worker_claim_batch`
+  `{worker,stage}`; plus Node process metrics prefixed `wildebeest_coordinator_`. Counters are per
+  coordinator process (reset on restart; `rate()` handles that).
+- HA: every replica serves `/metrics/prom`; Prometheus scrapes `coordinator` and `coordinator-2` with a
+  `coordinator_id` label. Counters and histograms count only what that replica handled itself (records
+  replicated over the cluster bus are not counted again), so **sum** them across replicas. Gauges come from
+  the cluster-wide `system` snapshot / Postgres and are the same on every replica, so take the **max**.

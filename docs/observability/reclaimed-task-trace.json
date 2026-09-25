@@ -1,0 +1,1293 @@
+{
+ "trace": {
+  "resourceSpans": [
+   {
+    "resource": {
+     "attributes": [
+      {
+       "key": "service.instance.id",
+       "value": {
+        "stringValue": "5b2ec9a2ff62"
+       }
+      },
+      {
+       "key": "service.namespace",
+       "value": {
+        "stringValue": "wildebeest"
+       }
+      },
+      {
+       "key": "telemetry.sdk.language",
+       "value": {
+        "stringValue": "python"
+       }
+      },
+      {
+       "key": "telemetry.sdk.name",
+       "value": {
+        "stringValue": "opentelemetry"
+       }
+      },
+      {
+       "key": "telemetry.sdk.version",
+       "value": {
+        "stringValue": "1.45.0"
+       }
+      },
+      {
+       "key": "wildebeest.stage",
+       "value": {
+        "stringValue": "detect"
+       }
+      },
+      {
+       "key": "service.name",
+       "value": {
+        "stringValue": "wildebeest-detector"
+       }
+      }
+     ]
+    },
+    "scopeSpans": [
+     {
+      "scope": {
+       "name": "wildebeest-worker"
+      },
+      "spans": [
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "reqC0xXtDC4=",
+        "parentSpanId": "DxQnHMuyeCo=",
+        "name": "fetch",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377178622993797",
+        "endTimeUnixNano": "1790377178677692672",
+        "attributes": [
+         {
+          "key": "wildebeest.object_key",
+          "value": {
+           "stringValue": "images/6ed2ed97d7bd7f8544f7b3f9913cc675e7bcce778a5e078fcb7d29601f197faa.jpg"
+          }
+         },
+         {
+          "key": "rpc.system",
+          "value": {
+           "stringValue": "s3"
+          }
+         },
+         {
+          "key": "wildebeest.prefetched",
+          "value": {
+           "boolValue": false
+          }
+         }
+        ],
+        "status": {}
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "resource": {
+     "attributes": [
+      {
+       "key": "service.instance.id",
+       "value": {
+        "stringValue": "coord-2"
+       }
+      },
+      {
+       "key": "service.namespace",
+       "value": {
+        "stringValue": "wildebeest"
+       }
+      },
+      {
+       "key": "service.name",
+       "value": {
+        "stringValue": "wildebeest-coordinator"
+       }
+      }
+     ]
+    },
+    "scopeSpans": [
+     {
+      "scope": {
+       "name": "wildebeest-coordinator"
+      },
+      "spans": [
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "KEgD6BVhc54=",
+        "name": "create detect",
+        "kind": "SPAN_KIND_PRODUCER",
+        "startTimeUnixNano": "1790377178564000000",
+        "endTimeUnixNano": "1790377178564126333",
+        "attributes": [
+         {
+          "key": "messaging.system",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "messaging.operation.name",
+          "value": {
+           "stringValue": "create"
+          }
+         },
+         {
+          "key": "messaging.operation.type",
+          "value": {
+           "stringValue": "create"
+          }
+         },
+         {
+          "key": "messaging.destination.name",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.message.id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.task_id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.stage",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "wildebeest.job_id",
+          "value": {
+           "stringValue": "1d71c42b-a529-487f-9f60-27eeee38cced"
+          }
+         }
+        ],
+        "links": [
+         {
+          "traceId": "UQ5eWis34D/MC6tsQOJ1Tw==",
+          "spanId": "GcyMtWXZS3c="
+         }
+        ],
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "5pK5Flx8GvI=",
+        "parentSpanId": "KEgD6BVhc54=",
+        "name": "lease detect",
+        "kind": "SPAN_KIND_SERVER",
+        "startTimeUnixNano": "1790377180700000000",
+        "endTimeUnixNano": "1790377182746000000",
+        "attributes": [
+         {
+          "key": "messaging.system",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "messaging.operation.name",
+          "value": {
+           "stringValue": "lease"
+          }
+         },
+         {
+          "key": "messaging.operation.type",
+          "value": {
+           "stringValue": "receive"
+          }
+         },
+         {
+          "key": "messaging.destination.name",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.message.id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.task_id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.stage",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.client.id",
+          "value": {
+           "stringValue": "detect-340c82ffc683"
+          }
+         },
+         {
+          "key": "wildebeest.worker_id",
+          "value": {
+           "stringValue": "detect-340c82ffc683"
+          }
+         },
+         {
+          "key": "wildebeest.lease_epoch",
+          "value": {
+           "intValue": "2"
+          }
+         },
+         {
+          "key": "wildebeest.speculative",
+          "value": {
+           "boolValue": false
+          }
+         },
+         {
+          "key": "wildebeest.claim_via",
+          "value": {
+           "stringValue": "hybrid"
+          }
+         }
+        ],
+        "events": [
+         {
+          "timeUnixNano": "1790377182746000000",
+          "name": "completed",
+          "attributes": [
+           {
+            "key": "wildebeest.worker_id",
+            "value": {
+             "stringValue": "detect-340c82ffc683"
+            }
+           }
+          ]
+         }
+        ],
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "VIXd0ozqSTQ=",
+        "parentSpanId": "YmYnOlRufwY=",
+        "name": "complete detect",
+        "kind": "SPAN_KIND_SERVER",
+        "startTimeUnixNano": "1790377182735225098",
+        "endTimeUnixNano": "1790377182746000000",
+        "attributes": [
+         {
+          "key": "messaging.system",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "messaging.operation.name",
+          "value": {
+           "stringValue": "complete"
+          }
+         },
+         {
+          "key": "messaging.operation.type",
+          "value": {
+           "stringValue": "settle"
+          }
+         },
+         {
+          "key": "messaging.destination.name",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.message.id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.task_id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.stage",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "wildebeest.worker_id",
+          "value": {
+           "stringValue": "detect-340c82ffc683"
+          }
+         },
+         {
+          "key": "wildebeest.lease_epoch",
+          "value": {
+           "intValue": "2"
+          }
+         },
+         {
+          "key": "wildebeest.write.accepted",
+          "value": {
+           "boolValue": true
+          }
+         },
+         {
+          "key": "wildebeest.batch_size",
+          "value": {
+           "intValue": "1"
+          }
+         }
+        ],
+        "status": {}
+       }
+      ]
+     },
+     {
+      "scope": {
+       "name": "@opentelemetry/instrumentation-pg",
+       "version": "0.74.0"
+      },
+      "spans": [
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "/54fk0IMmdM=",
+        "parentSpanId": "YmYnOlRufwY=",
+        "name": "pg.query:SELECT wildebeest",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377182736000000",
+        "endTimeUnixNano": "1790377182744921083",
+        "attributes": [
+         {
+          "key": "db.system.name",
+          "value": {
+           "stringValue": "postgresql"
+          }
+         },
+         {
+          "key": "db.namespace",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "server.port",
+          "value": {
+           "intValue": "5432"
+          }
+         },
+         {
+          "key": "db.query.text",
+          "value": {
+           "stringValue": "select * from wb_complete($1, $2::jsonb, $3, $4, $5, $6)"
+          }
+         },
+         {
+          "key": "server.address",
+          "value": {
+           "stringValue": "postgres"
+          }
+         }
+        ],
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "UPuYy23DH9A=",
+        "parentSpanId": "YmYnOlRufwY=",
+        "name": "pg.query:WITH wildebeest",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377182747000000",
+        "endTimeUnixNano": "1790377182749456459",
+        "attributes": [
+         {
+          "key": "db.system.name",
+          "value": {
+           "stringValue": "postgresql"
+          }
+         },
+         {
+          "key": "db.namespace",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "server.port",
+          "value": {
+           "intValue": "5432"
+          }
+         },
+         {
+          "key": "db.query.text",
+          "value": {
+           "stringValue": "\n    with picked as (select unnest($6::uuid[]) as id),\n    leased as (\n      update tasks t\n         set state = 'LEASED', lease_epoch = greatest(t.lease_epoch, coalesce(t.spec_epoch, 0)) + 1, worker_id = $1,\n             lease_expires_at = now() + ($2::int * interval '1 millisecond'),\n             started_at = now(), queued = false,\n             pushed_at = case when $5::boolean then now() else t.pushed_at end,\n             eligible_at = case when $5::boolean then now() else t.eligible_at end\n        from picked\n       where t.id = picked.id and t.state = 'PENDING'\n         and exists (select 1 from workers w where w.id = $1 and w.status = 'ALIVE' and w.stage = t.stage)\n      returning t.id, t.lease_epoch, t.stage, t.image_id, t.enqueued_at, t.traceparent\n    ),\n    logged as (\n      insert into task_events (task_id, worker_id, type, detail)\n      select id, $1, 'claimed', jsonb_build_object('leaseEpoch', lease_epoch) from leased\n    )\n    select l.id, l.lease_epoch, l.stage, i.sha256, i.object_key, coalesce(j.country_code, $3) as country_code,\n           d.detections, l.traceparent\n      from leased l\n      join images i on i.id = l.image_id\n      join jobs j on j.id = i.job_id\n      left join detection_results d on l.stage = 'classify' and d.sha256 = i.sha256 and d.model_version = $4\n     order by l.enqueued_at, l.id"
+          }
+         },
+         {
+          "key": "server.address",
+          "value": {
+           "stringValue": "postgres"
+          }
+         }
+        ],
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "jcAYWHXczn0=",
+        "parentSpanId": "YmYnOlRufwY=",
+        "name": "pg.query:WITH wildebeest",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377182751000000",
+        "endTimeUnixNano": "1790377182752089667",
+        "attributes": [
+         {
+          "key": "db.system.name",
+          "value": {
+           "stringValue": "postgresql"
+          }
+         },
+         {
+          "key": "db.namespace",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "server.port",
+          "value": {
+           "intValue": "5432"
+          }
+         },
+         {
+          "key": "db.query.text",
+          "value": {
+           "stringValue": "with pushed as (\n       update tasks set queued = true, pushed_at = now(),\n                        eligible_at = case when $4::timestamptz is null or greatest(pending_at, not_before) >= $4\n                                           then greatest(pending_at, not_before) else $5 end\n        where id in (select id from tasks\n                      where state = 'PENDING' and stage = $1 and queued = false\n                        and (started_at is not null) = $3\n                        and (not_before is null or not_before <= now())\n                      order by enqueued_at, id\n                      limit $2\n                      for update skip locked)\n        returning id, stage, enqueued_at\n     )\n     select id, stage from pushed order by enqueued_at, id"
+          }
+         },
+         {
+          "key": "server.address",
+          "value": {
+           "stringValue": "postgres"
+          }
+         }
+        ],
+        "status": {}
+       }
+      ]
+     },
+     {
+      "scope": {
+       "name": "@opentelemetry/instrumentation-ioredis",
+       "version": "0.70.0"
+      },
+      "spans": [
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "4CjOcNUHH3M=",
+        "parentSpanId": "YmYnOlRufwY=",
+        "name": "lpop",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377182746000000",
+        "endTimeUnixNano": "1790377182746337208",
+        "attributes": [
+         {
+          "key": "db.operation.name",
+          "value": {
+           "stringValue": "lpop"
+          }
+         },
+         {
+          "key": "db.system.name",
+          "value": {
+           "stringValue": "redis"
+          }
+         },
+         {
+          "key": "db.query.text",
+          "value": {
+           "stringValue": "lpop [2 other arguments]"
+          }
+         },
+         {
+          "key": "server.port",
+          "value": {
+           "intValue": "6379"
+          }
+         },
+         {
+          "key": "server.address",
+          "value": {
+           "stringValue": "redis"
+          }
+         }
+        ],
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "Zy1UtMafcZg=",
+        "parentSpanId": "YmYnOlRufwY=",
+        "name": "llen",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377182750000000",
+        "endTimeUnixNano": "1790377182750858167",
+        "attributes": [
+         {
+          "key": "db.operation.name",
+          "value": {
+           "stringValue": "llen"
+          }
+         },
+         {
+          "key": "db.system.name",
+          "value": {
+           "stringValue": "redis"
+          }
+         },
+         {
+          "key": "db.query.text",
+          "value": {
+           "stringValue": "llen queue:detect"
+          }
+         },
+         {
+          "key": "server.port",
+          "value": {
+           "intValue": "6379"
+          }
+         },
+         {
+          "key": "server.address",
+          "value": {
+           "stringValue": "redis"
+          }
+         }
+        ],
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "CiER5AIOYvs=",
+        "parentSpanId": "YmYnOlRufwY=",
+        "name": "publish",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377182797000000",
+        "endTimeUnixNano": "1790377182797585167",
+        "attributes": [
+         {
+          "key": "db.operation.name",
+          "value": {
+           "stringValue": "publish"
+          }
+         },
+         {
+          "key": "db.system.name",
+          "value": {
+           "stringValue": "redis"
+          }
+         },
+         {
+          "key": "db.query.text",
+          "value": {
+           "stringValue": "publish wildebeest:cluster:0 [1 other arguments]"
+          }
+         },
+         {
+          "key": "server.port",
+          "value": {
+           "intValue": "6379"
+          }
+         },
+         {
+          "key": "server.address",
+          "value": {
+           "stringValue": "redis"
+          }
+         }
+        ],
+        "status": {}
+       }
+      ]
+     },
+     {
+      "scope": {
+       "name": "@opentelemetry/instrumentation-http",
+       "version": "0.222.0"
+      },
+      "spans": [
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "YmYnOlRufwY=",
+        "parentSpanId": "CtJeaz3QNoU=",
+        "name": "POST /tasks/:id/complete",
+        "kind": "SPAN_KIND_SERVER",
+        "startTimeUnixNano": "1790377182734000000",
+        "endTimeUnixNano": "1790377182750515292",
+        "attributes": [
+         {
+          "key": "url.scheme",
+          "value": {
+           "stringValue": "http"
+          }
+         },
+         {
+          "key": "network.peer.address",
+          "value": {
+           "stringValue": "::ffff:172.25.0.8"
+          }
+         },
+         {
+          "key": "network.peer.port",
+          "value": {
+           "intValue": "37040"
+          }
+         },
+         {
+          "key": "network.protocol.version",
+          "value": {
+           "stringValue": "1.1"
+          }
+         },
+         {
+          "key": "user_agent.original",
+          "value": {
+           "stringValue": "python-requests/2.34.2"
+          }
+         },
+         {
+          "key": "client.address",
+          "value": {
+           "stringValue": "172.25.0.9"
+          }
+         },
+         {
+          "key": "server.port",
+          "value": {
+           "intValue": "3000"
+          }
+         },
+         {
+          "key": "http.response.status_code",
+          "value": {
+           "intValue": "200"
+          }
+         },
+         {
+          "key": "http.request.method",
+          "value": {
+           "stringValue": "POST"
+          }
+         },
+         {
+          "key": "url.path",
+          "value": {
+           "stringValue": "/tasks/1cd26c01-df3f-46a1-82ba-d6cc45b745a9/complete"
+          }
+         },
+         {
+          "key": "server.address",
+          "value": {
+           "stringValue": "coordinator-lb"
+          }
+         },
+         {
+          "key": "http.route",
+          "value": {
+           "stringValue": "/tasks/:id/complete"
+          }
+         }
+        ],
+        "status": {}
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "resource": {
+     "attributes": [
+      {
+       "key": "service.instance.id",
+       "value": {
+        "stringValue": "coord-1"
+       }
+      },
+      {
+       "key": "service.namespace",
+       "value": {
+        "stringValue": "wildebeest"
+       }
+      },
+      {
+       "key": "service.name",
+       "value": {
+        "stringValue": "wildebeest-coordinator"
+       }
+      }
+     ]
+    },
+    "scopeSpans": [
+     {
+      "scope": {
+       "name": "wildebeest-coordinator"
+      },
+      "spans": [
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "jdZ81V+yyJw=",
+        "parentSpanId": "KEgD6BVhc54=",
+        "name": "lease detect",
+        "kind": "SPAN_KIND_SERVER",
+        "startTimeUnixNano": "1790377178577000000",
+        "endTimeUnixNano": "1790377179981000000",
+        "attributes": [
+         {
+          "key": "messaging.system",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "messaging.operation.name",
+          "value": {
+           "stringValue": "lease"
+          }
+         },
+         {
+          "key": "messaging.operation.type",
+          "value": {
+           "stringValue": "receive"
+          }
+         },
+         {
+          "key": "messaging.destination.name",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.message.id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.task_id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.stage",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.client.id",
+          "value": {
+           "stringValue": "detect-5b2ec9a2ff62"
+          }
+         },
+         {
+          "key": "wildebeest.worker_id",
+          "value": {
+           "stringValue": "detect-5b2ec9a2ff62"
+          }
+         },
+         {
+          "key": "wildebeest.lease_epoch",
+          "value": {
+           "intValue": "1"
+          }
+         },
+         {
+          "key": "wildebeest.speculative",
+          "value": {
+           "boolValue": false
+          }
+         },
+         {
+          "key": "wildebeest.claim_via",
+          "value": {
+           "stringValue": "hybrid"
+          }
+         }
+        ],
+        "events": [
+         {
+          "timeUnixNano": "1790377179981000000",
+          "name": "reassigned",
+          "attributes": [
+           {
+            "key": "wildebeest.reason",
+            "value": {
+             "stringValue": "worker_dead"
+            }
+           },
+           {
+            "key": "wildebeest.worker_id",
+            "value": {
+             "stringValue": "detect-5b2ec9a2ff62"
+            }
+           },
+           {
+            "key": "wildebeest.charged",
+            "value": {
+             "boolValue": false
+            }
+           },
+           {
+            "key": "wildebeest.death.via",
+            "value": {
+             "stringValue": "docker_event"
+            }
+           },
+           {
+            "key": "wildebeest.death.detect_ms",
+            "value": {
+             "intValue": "341"
+            }
+           }
+          ]
+         }
+        ],
+        "status": {
+         "message": "lease lost: detect-5b2ec9a2ff62 died (docker_event)",
+         "code": "STATUS_CODE_ERROR"
+        }
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "9tkCDlKN3ws=",
+        "parentSpanId": "KEgD6BVhc54=",
+        "name": "requeue detect",
+        "kind": "SPAN_KIND_INTERNAL",
+        "startTimeUnixNano": "1790377179982000000",
+        "endTimeUnixNano": "1790377179982041791",
+        "attributes": [
+         {
+          "key": "messaging.system",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "messaging.operation.name",
+          "value": {
+           "stringValue": "requeue"
+          }
+         },
+         {
+          "key": "messaging.operation.type",
+          "value": {
+           "stringValue": "send"
+          }
+         },
+         {
+          "key": "messaging.destination.name",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.message.id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.task_id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.stage",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "wildebeest.reason",
+          "value": {
+           "stringValue": "worker_dead"
+          }
+         },
+         {
+          "key": "wildebeest.worker_id",
+          "value": {
+           "stringValue": "detect-5b2ec9a2ff62"
+          }
+         },
+         {
+          "key": "wildebeest.charged",
+          "value": {
+           "boolValue": false
+          }
+         },
+         {
+          "key": "wildebeest.death.via",
+          "value": {
+           "stringValue": "docker_event"
+          }
+         },
+         {
+          "key": "wildebeest.death.detect_ms",
+          "value": {
+           "intValue": "341"
+          }
+         }
+        ],
+        "events": [
+         {
+          "timeUnixNano": "1790377179982033041",
+          "name": "reassigned",
+          "attributes": [
+           {
+            "key": "wildebeest.reason",
+            "value": {
+             "stringValue": "worker_dead"
+            }
+           },
+           {
+            "key": "wildebeest.worker_id",
+            "value": {
+             "stringValue": "detect-5b2ec9a2ff62"
+            }
+           },
+           {
+            "key": "wildebeest.charged",
+            "value": {
+             "boolValue": false
+            }
+           },
+           {
+            "key": "wildebeest.death.via",
+            "value": {
+             "stringValue": "docker_event"
+            }
+           },
+           {
+            "key": "wildebeest.death.detect_ms",
+            "value": {
+             "intValue": "341"
+            }
+           }
+          ]
+         }
+        ],
+        "status": {}
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "resource": {
+     "attributes": [
+      {
+       "key": "service.instance.id",
+       "value": {
+        "stringValue": "340c82ffc683"
+       }
+      },
+      {
+       "key": "service.namespace",
+       "value": {
+        "stringValue": "wildebeest"
+       }
+      },
+      {
+       "key": "telemetry.sdk.language",
+       "value": {
+        "stringValue": "python"
+       }
+      },
+      {
+       "key": "telemetry.sdk.name",
+       "value": {
+        "stringValue": "opentelemetry"
+       }
+      },
+      {
+       "key": "telemetry.sdk.version",
+       "value": {
+        "stringValue": "1.45.0"
+       }
+      },
+      {
+       "key": "wildebeest.stage",
+       "value": {
+        "stringValue": "detect"
+       }
+      },
+      {
+       "key": "service.name",
+       "value": {
+        "stringValue": "wildebeest-detector"
+       }
+      }
+     ]
+    },
+    "scopeSpans": [
+     {
+      "scope": {
+       "name": "wildebeest-worker"
+      },
+      "spans": [
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "PouoZ2cw4XY=",
+        "parentSpanId": "ZSTlgp/vJBI=",
+        "name": "fetch",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377180705210423",
+        "endTimeUnixNano": "1790377180725986965",
+        "attributes": [
+         {
+          "key": "wildebeest.object_key",
+          "value": {
+           "stringValue": "images/6ed2ed97d7bd7f8544f7b3f9913cc675e7bcce778a5e078fcb7d29601f197faa.jpg"
+          }
+         },
+         {
+          "key": "rpc.system",
+          "value": {
+           "stringValue": "s3"
+          }
+         },
+         {
+          "key": "wildebeest.prefetched",
+          "value": {
+           "boolValue": false
+          }
+         }
+        ],
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "9flKtTGGIjc=",
+        "parentSpanId": "ZSTlgp/vJBI=",
+        "name": "infer",
+        "kind": "SPAN_KIND_INTERNAL",
+        "startTimeUnixNano": "1790377180726013173",
+        "endTimeUnixNano": "1790377182729839799",
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "ZSTlgp/vJBI=",
+        "parentSpanId": "5pK5Flx8GvI=",
+        "name": "process detect",
+        "kind": "SPAN_KIND_CONSUMER",
+        "startTimeUnixNano": "1790377180705133965",
+        "endTimeUnixNano": "1790377182729839799",
+        "attributes": [
+         {
+          "key": "messaging.system",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "messaging.operation.name",
+          "value": {
+           "stringValue": "process"
+          }
+         },
+         {
+          "key": "messaging.operation.type",
+          "value": {
+           "stringValue": "process"
+          }
+         },
+         {
+          "key": "messaging.destination.name",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.message.id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "messaging.client.id",
+          "value": {
+           "stringValue": "detect-340c82ffc683"
+          }
+         },
+         {
+          "key": "wildebeest.task_id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.stage",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "wildebeest.lease_epoch",
+          "value": {
+           "intValue": "2"
+          }
+         },
+         {
+          "key": "wildebeest.worker_id",
+          "value": {
+           "stringValue": "detect-340c82ffc683"
+          }
+         },
+         {
+          "key": "wildebeest.image_key",
+          "value": {
+           "stringValue": "images/6ed2ed97d7bd7f8544f7b3f9913cc675e7bcce778a5e078fcb7d29601f197faa.jpg"
+          }
+         },
+         {
+          "key": "wildebeest.claim_ms",
+          "value": {
+           "doubleValue": 24.4
+          }
+         },
+         {
+          "key": "wildebeest.speculative",
+          "value": {
+           "boolValue": false
+          }
+         }
+        ],
+        "status": {}
+       },
+       {
+        "traceId": "yUZiix6KoS4amuWapFzLQA==",
+        "spanId": "CtJeaz3QNoU=",
+        "parentSpanId": "ZSTlgp/vJBI=",
+        "name": "settle detect",
+        "kind": "SPAN_KIND_CLIENT",
+        "startTimeUnixNano": "1790377182730467591",
+        "endTimeUnixNano": "1790377182751562466",
+        "attributes": [
+         {
+          "key": "messaging.system",
+          "value": {
+           "stringValue": "wildebeest"
+          }
+         },
+         {
+          "key": "messaging.operation.name",
+          "value": {
+           "stringValue": "settle"
+          }
+         },
+         {
+          "key": "messaging.operation.type",
+          "value": {
+           "stringValue": "settle"
+          }
+         },
+         {
+          "key": "messaging.destination.name",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "messaging.message.id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "messaging.client.id",
+          "value": {
+           "stringValue": "detect-340c82ffc683"
+          }
+         },
+         {
+          "key": "wildebeest.task_id",
+          "value": {
+           "stringValue": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9"
+          }
+         },
+         {
+          "key": "wildebeest.stage",
+          "value": {
+           "stringValue": "detect"
+          }
+         },
+         {
+          "key": "wildebeest.lease_epoch",
+          "value": {
+           "intValue": "2"
+          }
+         },
+         {
+          "key": "wildebeest.worker_id",
+          "value": {
+           "stringValue": "detect-340c82ffc683"
+          }
+         },
+         {
+          "key": "wildebeest.report",
+          "value": {
+           "stringValue": "complete"
+          }
+         },
+         {
+          "key": "messaging.batch.message_count",
+          "value": {
+           "intValue": "1"
+          }
+         },
+         {
+          "key": "http.response.status_code",
+          "value": {
+           "intValue": "200"
+          }
+         },
+         {
+          "key": "wildebeest.report.status",
+          "value": {
+           "stringValue": "ok"
+          }
+         }
+        ],
+        "status": {}
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "metrics": {
+  "inspectedBytes": "45558"
+ }
+}

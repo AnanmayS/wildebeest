@@ -1,0 +1,5 @@
+# Tracing (docs/decisions/o-observability.md). Imported only when OTEL_EXPORTER_OTLP_ENDPOINT is
+# set; without these packages the worker runs untraced. Installed as its own image layer after
+# the model download, so adding it doesn't rebuild the multi-GB layers.
+opentelemetry-sdk~=1.45
+opentelemetry-exporter-otlp-proto-http~=1.45

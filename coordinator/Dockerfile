@@ -18,4 +18,5 @@ COPY migrations ./migrations
 EXPOSE 3000
 # Runs as root so it can reach the mounted /var/run/docker.sock (Kill button, chaos mode).
 # On start: apply pending migrations, ensure the MinIO bucket, then serve (see src/index.ts).
-CMD ["node", "dist/index.js"]
+# otel-preload does nothing unless OTEL_EXPORTER_OTLP_ENDPOINT is set (then: tracing, see otel-sdk.ts).
+CMD ["node", "--import", "./dist/otel-preload.js", "dist/index.js"]

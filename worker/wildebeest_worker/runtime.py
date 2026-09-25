@@ -53,6 +53,8 @@ from typing import Callable
 
 import requests
 
+from . import tracing
+
 log = logging.getLogger("wildebeest.worker")
 
 Handler = Callable[[dict], dict]  # lease -> result (without latencyMs)
@@ -292,6 +294,7 @@ class Worker:
         self.tasks_cancelled = 0
         self.tasks_done = 0
         self.total_latency_ms = 0.0
+        tracing.setup(stage)  # no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set
 
     @property
     def device(self) -> str:
@@ -318,7 +321,8 @@ class Worker:
     # ---------------------------------------------------------------- HTTP
 
     def _post(self, path: str, body: dict, attempts: int = 5, budget_s: float | None = None,
-              abort: threading.Event | None = None, timeout: float = 10) -> requests.Response:
+              abort: threading.Event | None = None, timeout: float = 10,
+              headers: dict | None = None) -> requests.Response:
         """POST, retrying connection errors, timeouts and 502/503/504 with full-jitter backoff.
 
         Gives up after `attempts` tries, or, when `budget_s` is set, once that much time has
@@ -332,7 +336,8 @@ class Worker:
             attempt += 1
             failure: Exception | None = None
             try:
-                resp = self.http.post(f"{self.base_url}{path}", json=body, timeout=timeout)
+                extra = {"headers": headers} if headers else {}  # traceparent, tracing on only
+                resp = self.http.post(f"{self.base_url}{path}", json=body, timeout=timeout, **extra)
                 if resp.status_code not in RETRY_STATUSES:
                     return resp
             except (requests.ConnectionError, requests.Timeout) as e:
@@ -349,9 +354,24 @@ class Worker:
                     raise failure
                 return resp
 
-    def _report(self, path: str, body: dict) -> requests.Response:
+    def _report(self, path: str, body: dict, headers: dict | None = None) -> requests.Response:
         """complete / fail / release: retried for up to one lease length."""
-        return self._post(path, body, budget_s=self.lease_s, abort=self.dead)
+        return self._post(path, body, budget_s=self.lease_s, abort=self.dead, headers=headers)
+
+    def _report_task(self, action: str, lease: dict, path: str, body: dict) -> requests.Response:
+        """fail / release one task, inside a `settle` span when tracing is on."""
+        ref = {"taskId": lease["taskId"], "leaseEpoch": lease["leaseEpoch"]}
+        span = tracing.settle(action, self.stage, self.worker_id, [ref])
+        if "traceparent" in ref:
+            body["traceparent"] = ref["traceparent"]
+        try:
+            resp = self._report(path, body, headers=span.headers())
+        except Exception as e:
+            span.done(error=e)
+            raise
+        span.done([("already_done" if _error_code(resp) == "ALREADY_DONE" else "stale")
+                   if resp.status_code == 409 else "ok"], resp.status_code)
+        return resp
 
     # ------------------------------------------------------------ lifecycle
 
@@ -524,8 +544,8 @@ class Worker:
     def release(self, lease: dict, reason: str) -> None:
         """Give a lease back without spending an attempt (infrastructure trouble, not the task's)."""
         task_id = lease["taskId"]
-        resp = self._report(f"/tasks/{task_id}/release",
-                            {"workerId": self.worker_id, "leaseEpoch": lease["leaseEpoch"], "reason": reason[:500]})
+        resp = self._report_task("release", lease, f"/tasks/{task_id}/release",
+                                 {"workerId": self.worker_id, "leaseEpoch": lease["leaseEpoch"], "reason": reason[:500]})
         if resp.status_code == 409:
             log.info("release for %s rejected: %s", task_id, _error_code(resp))
 
@@ -534,7 +554,7 @@ class Worker:
         body = {"workerId": self.worker_id, "leaseEpoch": lease["leaseEpoch"], "error": error[:1000]}
         if non_retryable:
             body["nonRetryable"] = True
-        resp = self._report(f"/tasks/{task_id}/fail", body)
+        resp = self._report_task("fail", lease, f"/tasks/{task_id}/fail", body)
         if resp.status_code == 409:
             log.info("fail for %s rejected: %s", task_id, _error_code(resp))
 
@@ -562,6 +582,8 @@ class Worker:
             return
         zombie = self.dead.is_set()
         refill = 0 if (zombie or self.stopping.is_set() or self.breaker.is_open) else max(0, want)
+        # One `settle` span per task (tracing on only); each item carries its own traceparent.
+        settle = tracing.settle("complete", self.stage, self.worker_id, [f.item for f in batch], len(batch))
         if len(batch) == 1:
             path = f"/tasks/{batch[0].item['taskId']}/complete"
             body = {"workerId": self.worker_id, **{k: v for k, v in batch[0].item.items() if k != "taskId"}}
@@ -573,22 +595,31 @@ class Worker:
 
         started = time.perf_counter()
         try:
-            resp = self._post(path, body, attempts=1) if zombie else self._report(path, body)
+            resp = (self._post(path, body, attempts=1, headers=settle.headers()) if zombie
+                    else self._report(path, body, headers=settle.headers()))
+        except Exception as e:
+            settle.done(error=e)
+            raise
         finally:
             with self.lock:  # sent (or given up on): these leases are no longer ours to renew
                 del self.finished[:len(batch)]
         request_ms = (time.perf_counter() - started) * 1000
 
-        if len(batch) == 1:
-            if resp.status_code == 409:
-                statuses = ["already_done" if _error_code(resp) == "ALREADY_DONE" else "stale"]
+        try:
+            if len(batch) == 1:
+                if resp.status_code == 409:
+                    statuses = ["already_done" if _error_code(resp) == "ALREADY_DONE" else "stale"]
+                else:
+                    resp.raise_for_status()
+                    statuses = ["ok"]
             else:
                 resp.raise_for_status()
-                statuses = ["ok"]
-        else:
-            resp.raise_for_status()
-            by_id = {r["taskId"]: r["status"] for r in resp.json().get("results", [])}
-            statuses = [by_id.get(f.item["taskId"], "invalid") for f in batch]
+                by_id = {r["taskId"]: r["status"] for r in resp.json().get("results", [])}
+                statuses = [by_id.get(f.item["taskId"], "invalid") for f in batch]
+        except Exception as e:
+            settle.done(http_status=resp.status_code, error=e)
+            raise
+        settle.done(statuses, resp.status_code)
 
         for f, status in zip(batch, statuses):
             if status == "ok":
@@ -613,6 +644,10 @@ class Worker:
 
     def execute(self, lease: dict, claim_ms: float = 0.0) -> None:
         """Run one task. A result joins the report buffer; an error is reported at once."""
+        with tracing.process(lease, self.stage, self.worker_id, claim_ms):  # no-op when tracing is off
+            self._execute(lease, claim_ms)
+
+    def _execute(self, lease: dict, claim_ms: float) -> None:
         with self.lock:
             self.current_image_key = lease.get("imageKey")
         if self.io is not None:
@@ -668,6 +703,7 @@ class Worker:
             log.info("task %s failed after we were declared dead; not reporting (%s)", task_id, message)
             return
         kind = classify_error(e)
+        tracing.record_error(e, kind)
         if kind == INFRA:
             log.warning("task %s hit an infrastructure error, releasing it: %s", task_id, message)
             self.breaker.trip(message)  # first, so we stop claiming even if the release can't be sent

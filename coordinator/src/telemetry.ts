@@ -3,7 +3,9 @@
 // Everything here is cheap to record on the hot path (an array push or a counter bump) and is
 // summarised at most ~2×/s when a snapshot is built. It is process-local and resets when the
 // coordinator restarts; Postgres keeps the durable per-task record (tasks.pushed_at, timings,
-// complete_ms, task_events).
+// complete_ms, task_events). The same events also feed the Prometheus counters (prom.ts).
+
+import { metrics } from "./prom.js";
 
 export type Stage = "detect" | "classify";
 
@@ -159,6 +161,7 @@ class Telemetry {
   /** A completion's waterfall sample (also how a completion handled by another replica arrives). */
   recordSample(sample: TimingSample) {
     this.throughput.add(sample.stage, 1, sample.at);
+    metrics.completion(sample);
     this.samples.push(sample);
     if (this.samples.length > this.maxSamples) this.samples.splice(0, this.samples.length - this.maxSamples);
   }
@@ -178,11 +181,13 @@ class Telemetry {
 
   recordStale(taskId: string, workerId: string, epoch: number, currentEpoch: number) {
     this.fencing.staleRejected++;
+    metrics.staleRejected();
     this.fencing.last = { taskId, workerId, epoch, currentEpoch, at: new Date().toISOString() };
   }
 
   recordJobCreated(hits: number, total: number) {
     this.cacheWindow.push({ at: now(), hits, total });
+    metrics.jobCreated(hits, total);
   }
 
   /** Takes the backlog of (taskId, completeMs) pairs for the write-behind flush. */
@@ -224,6 +229,7 @@ class Telemetry {
       },
     };
     this.recoveries.push(open);
+    metrics.recovery(r.via);
     for (const id of r.taskIds) this.recoveryByTask.set(id, open);
     if (open.outstanding.size === 0) this.close(open, r.requeuedAt.getTime());
     while (this.recoveries.length > MAX_RECOVERY_RECORDS) {
@@ -253,6 +259,7 @@ class Telemetry {
     open.record.reclaimedBy = reclaimedBy;
     open.record.reclaimedAt = new Date(at).toISOString();
     open.record.totalMs = Math.max(0, Math.round(at - open.startMs));
+    metrics.recovered(open.record.totalMs);
   }
 
   /** Newest first. */

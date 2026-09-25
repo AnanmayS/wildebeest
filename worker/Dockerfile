@@ -26,6 +26,11 @@ ARG SPECIESNET_MODEL=kaggle:google/speciesnet/pyTorch/v4.0.3a/1
 ENV SPECIESNET_MODEL=${SPECIESNET_MODEL}
 RUN python -W ignore -c "import os; from speciesnet.utils import ModelInfo; print(ModelInfo(os.environ['SPECIESNET_MODEL']))"
 
+# OpenTelemetry (tracing is off unless OTEL_EXPORTER_OTLP_ENDPOINT is set). A layer of its own,
+# after the model download, so it doesn't invalidate the multi-GB layers above.
+COPY requirements-otel.txt .
+RUN pip install -r requirements-otel.txt
+
 COPY wildebeest_worker ./wildebeest_worker
 
 CMD ["python", "-m", "wildebeest_worker"]

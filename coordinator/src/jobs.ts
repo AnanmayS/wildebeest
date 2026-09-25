@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import { query, tx } from "./db.js";
 import { afterJobCreated, isThrottled, queueDepths } from "./dispatcher.js";
 import { hub, recordEvents, type EventInput } from "./events.js";
+import { stampJobTasks, stampNewTasks } from "./otel.js";
 import { categorize, categorizeSpecies, maybeFinishJob, type Category, type ClassificationRow, type Detection } from "./results.js";
 import { imageKey, presign, putIfMissing } from "./storage.js";
 import { ValidationError } from "./tasks.js";
@@ -148,6 +149,8 @@ export async function createJob(opts: {
         [taskIds, withTask.map((p) => p.id), withTask.map((p) => p.task)],
       );
     }
+    // Tracing on: one PRODUCER span per task, its traceparent stored on the row before commit.
+    await stampNewTasks(c, withTask.map((p, i) => ({ id: taskIds[i], stage: p.task! })), jobId);
     const ev: EventInput[] = withTask.map((p, i) => ({
       type: "enqueued",
       taskId: taskIds[i],
@@ -214,6 +217,7 @@ export async function createSyntheticJob(count: unknown, stage: unknown = "detec
        select task_id, image_id, $3, 'PENDING', now() + (g * interval '1 microsecond') from gen`,
       [jobId, n, stage],
     );
+    await stampJobTasks(c, jobId); // tracing on only
   });
   hub.jobChanged(jobId);
   await dispatchAfterCommit();

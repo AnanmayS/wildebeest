@@ -1,0 +1,51 @@
+{
+ "taskId": "1cd26c01-df3f-46a1-82ba-d6cc45b745a9",
+ "killedWorker": "detect-5b2ec9a2ff62",
+ "traceparent": "00-c946628b1e8aa12e1a9ae59aa45ccb40-284803e81561739e-01",
+ "events": [
+  [
+   "enqueued",
+   "2026-09-25T22:59:38.559558+00:00",
+   null,
+   {
+    "jobId": "1d71c42b-a529-487f-9f60-27eeee38cced",
+    "stage": "detect"
+   }
+  ],
+  [
+   "claimed",
+   "2026-09-25T22:59:38.577535+00:00",
+   "detect-5b2ec9a2ff62",
+   {
+    "leaseEpoch": 1
+   }
+  ],
+  [
+   "reassigned",
+   "2026-09-25T22:59:39.971944+00:00",
+   "detect-5b2ec9a2ff62",
+   {
+    "stage": "detect",
+    "charged": false,
+    "attempts": 0
+   }
+  ],
+  [
+   "claimed",
+   "2026-09-25T22:59:40.700822+00:00",
+   "detect-340c82ffc683",
+   {
+    "leaseEpoch": 2
+   }
+  ],
+  [
+   "succeeded",
+   "2026-09-25T22:59:42.736659+00:00",
+   "detect-340c82ffc683",
+   {
+    "stage": "detect",
+    "leaseEpoch": 2
+   }
+  ]
+ ]
+}

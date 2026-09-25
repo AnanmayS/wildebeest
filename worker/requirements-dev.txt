@@ -6,3 +6,5 @@ boto3
 redis>=5
 requests
 pillow
+# Worker tracing tests (tests/test_tracing.py) use the SDK with an in-memory exporter.
+opentelemetry-sdk~=1.45

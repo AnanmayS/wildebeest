@@ -4,6 +4,7 @@ import { pushNow } from "./dispatcher.js";
 import { hub, recordEvents } from "./events.js";
 import { getRedis, keys } from "./redis.js";
 import { requeueLostLeases } from "./tasks.js";
+import { workersDied } from "./otel.js";
 import { telemetry, type DeathVia } from "./telemetry.js";
 import { drainProcessingList } from "./workers.js";
 
@@ -102,6 +103,7 @@ async function handleDeaths(
     const detectedAt = new Date(w.dead_at);
     return { w, ev, killedAt, startMs: at.getTime(), detectedAt, detectMs: Math.max(0, detectedAt.getTime() - at.getTime()) };
   });
+  workersDied(facts.map((f) => ({ workerId: f.w.id, via, detectMs: f.detectMs }))); // for the requeue spans
 
   const died = await recordEvents(
     getPool(),

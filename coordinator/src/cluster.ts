@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { setWakeRelay, wake, type Stage } from "./dispatcher.js";
 import { hub, type EventRow, type HubRelay } from "./events.js";
 import { getRedis } from "./redis.js";
+import { fromBus } from "./prom.js";
 import { serviceTimes } from "./speculation.js";
 import { telemetry } from "./telemetry.js";
 
@@ -245,6 +246,10 @@ export class ClusterBus implements HubRelay {
   }
 
   private applyTelemetry(method: string, args: any[]) {
+    fromBus(() => this.applyRemote(method, args)); // counted by the replica that handled it (prom.ts)
+  }
+
+  private applyRemote(method: string, args: any[]) {
     if (method === "recordSample") return telemetry.recordSample(args[0]);
     if (method === "serviceTime") return this.serviceTimesRecord?.apply(serviceTimes, args as never);
     if (method === "recordRecovery") {

@@ -8,6 +8,7 @@ import { closePool, migrate, nodeId } from "./db.js";
 import { hub } from "./events.js";
 import { startHa } from "./ha.js";
 import { jobSummary } from "./jobs.js";
+import { shutdownTracing } from "./otel-sdk.js";
 import { closeRedis } from "./redis.js";
 import { ensureBucket } from "./storage.js";
 import { systemSnapshot } from "./system.js";
@@ -58,7 +59,7 @@ async function main() {
     await resumeAll();
     hub.close();
     server.close();
-    await Promise.allSettled([closePool(), closeRedis()]);
+    await Promise.allSettled([closePool(), closeRedis(), shutdownTracing()]);
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

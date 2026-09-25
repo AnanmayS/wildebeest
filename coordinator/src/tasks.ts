@@ -12,6 +12,8 @@ import {
   type Stage,
 } from "./dispatcher.js";
 import { hub, recordEvents, type EventInput, type EventRow } from "./events.js";
+import * as traces from "./otel.js";
+import { metrics } from "./prom.js";
 import { getRedis, keys } from "./redis.js";
 import { telemetry } from "./telemetry.js";
 import { finalizeImage, maybeFinishJob, type Detection } from "./results.js";
@@ -66,6 +68,8 @@ export interface Lease {
   detections: Detection[] | null;
   /** A speculative copy of a task another worker holds (additive; workers treat it like any lease). */
   speculative?: boolean;
+  /** W3C trace context for the worker's process span (null when the task isn't traced). */
+  traceparent: string | null;
 }
 
 /** Side effects to run once a transaction has committed. */
@@ -118,14 +122,14 @@ function leaseSql(pick: string) {
         from picked
        where t.id = picked.id and t.state = 'PENDING'
          and exists (select 1 from workers w where w.id = $1 and w.status = 'ALIVE' and w.stage = t.stage)
-      returning t.id, t.lease_epoch, t.stage, t.image_id, t.enqueued_at
+      returning t.id, t.lease_epoch, t.stage, t.image_id, t.enqueued_at, t.traceparent
     ),
     logged as (
       insert into task_events (task_id, worker_id, type, detail)
       select id, $1, 'claimed', jsonb_build_object('leaseEpoch', lease_epoch) from leased
     )
     select l.id, l.lease_epoch, l.stage, i.sha256, i.object_key, coalesce(j.country_code, $3) as country_code,
-           d.detections
+           d.detections, l.traceparent
       from leased l
       join images i on i.id = l.image_id
       join jobs j on j.id = i.job_id
@@ -176,12 +180,14 @@ async function lease(workerId: string, pick: string, fromPostgres: boolean, pick
     sha256: r.sha256,
     countryCode: r.country_code,
     detections: r.stage === "classify" ? (r.detections ?? []) : null,
+    traceparent: r.traceparent ?? null,
   }));
 }
 
 /** Telemetry, dashboard, and (push mode) refilling queue:detect behind a detect claim. */
 function afterClaim(workerId: string, leases: Lease[]) {
   if (leases.length === 0) return;
+  traces.leased(workerId, leases, config.claimMode); // opens the attempt spans, sets lease.traceparent
   telemetry.recordClaimed(leases.map((l) => l.taskId), workerId);
   hub.workersChanged();
   if (config.claimMode === "hybrid" && leases.some((l) => l.stage === "detect")) kickDetectInBackground();
@@ -222,7 +228,7 @@ export async function leaseCopies(workerId: string, taskIds: string[] | null): P
   const { rows } = await query(
     `with ok as (
        select t.id, t.stage, t.image_id, t.worker_id as original_worker, t.lease_epoch as original_epoch,
-              a.epoch, a.detail, (extract(epoch from (now() - t.started_at)) * 1000)::int as age_ms
+              a.epoch, a.detail, (extract(epoch from (now() - t.started_at)) * 1000)::int as age_ms, t.traceparent
          from task_attempts a join tasks t on t.id = a.task_id
         where a.worker_id = $1 and a.state = 'offered' and ($2::uuid[] is null or a.task_id = any($2::uuid[]))
           and t.state = 'LEASED' and t.lease_epoch = a.shadow_epoch and t.worker_id <> $1
@@ -245,7 +251,7 @@ export async function leaseCopies(workerId: string, taskIds: string[] | null): P
        returning id, at, type, task_id, worker_id, detail
      )
      select ok.id, ok.epoch, ok.stage, i.sha256, i.object_key, coalesce(j.country_code, $4) as country_code,
-            d.detections, (select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) from logged l) as events
+            d.detections, ok.traceparent, (select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) from logged l) as events
        from ok
        join started s on s.task_id = ok.id
        join images i on i.id = ok.image_id
@@ -265,7 +271,7 @@ export async function leaseCopies(workerId: string, taskIds: string[] | null): P
     })),
   );
   hub.workersChanged();
-  return rows.map((r) => ({
+  const copies: Lease[] = rows.map((r) => ({
     taskId: r.id,
     leaseEpoch: r.epoch,
     stage: r.stage,
@@ -274,7 +280,10 @@ export async function leaseCopies(workerId: string, taskIds: string[] | null): P
     countryCode: r.country_code,
     detections: r.stage === "classify" ? (r.detections ?? []) : null,
     speculative: true,
+    traceparent: r.traceparent ?? null,
   }));
+  traces.leased(workerId, copies, "speculative"); // its own attempt span in the task's trace
+  return copies;
 }
 
 const orderLike = (ids: string[], leases: Lease[]) => {
@@ -610,6 +619,7 @@ export async function completeTasks(
     }
   }
   telemetry.recordFinalized(finalised);
+  await traces.completed(workerId, items, rows, startedAt); // before the push: stamps new classify tasks
 
   if (newClassify.length > 0) {
     // Outbox: the rows committed with queued=false; if this push is lost, the repair sweep does it.
@@ -816,6 +826,7 @@ export async function failTask(
     );
     if (rows.length === 0) return null;
     const t = rows[0];
+    metrics.failed(t.stage, t.state === "FAILED");
     const { rows: imgs } = await c.query(`select job_id from images where id = $1`, [t.image_id]);
     fx.jobs.add(imgs[0].job_id);
     fx.events.push({
@@ -881,6 +892,10 @@ export interface Requeued {
   workerGone: boolean;
   /** True when the coordinator itself killed or paused the worker: no attempt was charged. */
   induced: boolean;
+  /** The lost attempt (for its trace span): its epoch, claim time and the task's trace context. */
+  leaseEpoch?: number;
+  startedAt?: Date | null;
+  traceparent?: string | null;
 }
 
 /**
@@ -913,7 +928,14 @@ export async function requeueLostLeases(
     }
 
     const { rows } = await c.query<
-      RetriedRow & { old_worker: string | null; worker_gone: boolean; induced: boolean }
+      RetriedRow & {
+        old_worker: string | null;
+        worker_gone: boolean;
+        induced: boolean;
+        lease_epoch: number;
+        started_at: Date | null;
+        traceparent: string | null;
+      }
     >(
       `with lost as (
          select t.id, t.worker_id as old_worker, (w.status is distinct from 'ALIVE') as worker_gone,
@@ -943,7 +965,8 @@ export async function requeueLostLeases(
               queued = false, worker_id = null, lease_expires_at = null
          from decided d
         where t.id = d.id and t.state = 'LEASED'
-        returning t.id, t.stage, t.state, t.attempts, t.image_id, d.old_worker, d.worker_gone, d.induced`,
+        returning t.id, t.stage, t.state, t.attempts, t.image_id, d.old_worker, d.worker_gone, d.induced,
+                  t.lease_epoch, t.started_at, t.traceparent`,
       [config.maxAttempts, graceMs, opts.workerIds ?? null],
     );
     if (rows.length === 0 && promoted.length === 0) {
@@ -979,10 +1002,21 @@ export async function requeueLostLeases(
     await finalizeFailed(c, failed, fx);
     const tasks: Requeued[] = rows
       .filter((r) => r.state === "PENDING")
-      .map((r) => ({ id: r.id, stage: r.stage, oldWorker: r.old_worker, workerGone: r.worker_gone, induced: r.induced }));
+      .map((r) => ({
+        id: r.id,
+        stage: r.stage,
+        oldWorker: r.old_worker,
+        workerGone: r.worker_gone,
+        induced: r.induced,
+        leaseEpoch: r.lease_epoch,
+        startedAt: r.started_at,
+        traceparent: r.traceparent,
+      }));
     return { requeued: tasks.length, failed: failed.length, tasks, events: await commitEffects(c, fx) };
   });
   publish(result.events, fx.jobs);
+  traces.requeued(result.tasks);
+  metrics.leasesLost(result.tasks);
   const dropped = await dropDeadCopies({ graceMs, workerIds: opts.workerIds ?? null });
   if (result.requeued + result.failed + result.events.length + dropped > 0) hub.workersChanged();
   return { requeued: result.requeued, failed: result.failed, tasks: result.tasks };

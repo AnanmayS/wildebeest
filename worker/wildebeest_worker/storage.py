@@ -23,6 +23,7 @@ import PIL.Image
 import PIL.ImageFile
 import PIL.ImageOps
 
+from . import tracing
 from .runtime import InfraError, NonRetryableError
 
 PIL.ImageFile.LOAD_TRUNCATED_IMAGES = True  # camera-trap JPEGs are sometimes truncated
@@ -139,16 +140,18 @@ class Storage:
         with self._prefetch_lock:
             pending: Future | None = self._prefetched.pop(key, None)
         try:
-            if pending is not None and not pending.cancelled():
-                return pending.result()  # re-raises the download's own (translated) error
-            return self._download(key)
+            with tracing.io_span("fetch", key, **{"wildebeest.prefetched": pending is not None}):
+                if pending is not None and not pending.cancelled():
+                    return pending.result()  # re-raises the download's own (translated) error
+                return self._download(key)
         finally:
             self.timer.fetch_ms += (time.perf_counter() - started) * 1000
 
     def put_jpeg(self, key: str, data: bytes) -> None:
         started = time.perf_counter()
         try:
-            self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="image/jpeg")
+            with tracing.io_span("upload", key, **{"wildebeest.bytes": len(data)}):
+                self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType="image/jpeg")
         except Exception as e:
             raise translate_s3_error(e, key) from e
         finally:

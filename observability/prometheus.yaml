@@ -1,0 +1,32 @@
+# Prometheus config for the grafana/otel-lgtm container (mounted over /otel-lgtm/prometheus.yaml).
+# The image's default (OTLP receiver settings, copied from otel-lgtm v0.34.0) plus one scrape job:
+# the coordinator's /metrics/prom. Traces go OTLP → collector → Tempo; Tempo's metrics generator
+# and the collector's own metrics arrive through the OTLP receiver as before.
+global:
+  scrape_native_histograms: true
+otlp:
+  keep_identifying_resource_attributes: true
+  promote_resource_attributes:
+    - service.instance.id
+    - service.name
+    - service.namespace
+    - service.version
+    - container.name
+    - deployment.environment.name
+    - host.name
+storage:
+  tsdb:
+    out_of_order_time_window: 10m
+
+scrape_configs:
+  - job_name: wildebeest-coordinator
+    scrape_interval: 2s
+    scrape_timeout: 2s
+    metrics_path: /metrics/prom
+    # Both HA replicas: each counts what it handled itself (sum them); gauges are cluster-wide
+    # snapshots, the same on every replica (take the max).
+    static_configs:
+      - targets: ["coordinator:3000"]
+        labels: { coordinator_id: coord-1 }
+      - targets: ["coordinator-2:3000"]
+        labels: { coordinator_id: coord-2 }

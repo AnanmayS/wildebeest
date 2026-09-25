@@ -1,0 +1,12 @@
+# Grafana dashboard provider, mounted into /otel-lgtm/grafana/conf/provisioning/dashboards/:
+# loads observability/grafana/dashboards/*.json into the "Wildebeest" folder at startup.
+apiVersion: 1
+
+providers:
+  - name: Wildebeest
+    folder: Wildebeest
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /otel-lgtm/wildebeest-dashboards
+      foldersFromFilesStructure: false

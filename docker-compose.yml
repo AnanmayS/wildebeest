@@ -8,6 +8,19 @@ x-model-env: &model-env
   # If you change it, change DETECTOR_MODEL_VERSION too so cached results aren't reused.
   DETECTOR_IMG_SIZE: ${DETECTOR_IMG_SIZE:-640}
 
+# Tracing (docs/decisions/o-observability.md). Empty endpoint = off: no SDK is loaded at all.
+# With the observability profile, point it at the bundled collector:
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 docker compose --profile observability up -d
+# OTEL_TRACES_SAMPLER=parentbased_traceidratio + OTEL_TRACES_SAMPLER_ARG=0.1 keeps 10% of images
+# (the coordinator decides per image; workers follow the traceparent flags).
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
+  OTEL_BSP_SCHEDULE_DELAY: ${OTEL_BSP_SCHEDULE_DELAY:-1000}
+  OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-32768}
+  OTEL_BSP_MAX_EXPORT_BATCH_SIZE: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:-2048}
+
 x-worker: &worker
   build: ./worker
   image: wildebeest-worker:${WORKER_TAG:-latest}
@@ -61,7 +74,8 @@ services:
     build: ./coordinator
     image: wildebeest-coordinator:${WORKER_TAG:-latest}
     environment:
-      <<: *model-env
+      <<: [*model-env, *otel-env]
+      OTEL_SERVICE_NAME: wildebeest-coordinator
       COORDINATOR_ID: ${COORDINATOR_ID:-coord-1}
       # Leader lease (River-style): renewed every LEADER_RENEW_MS, taken over LEADER_TTL_MS after the
       # leader's last renewal.
@@ -147,7 +161,8 @@ services:
   detector:
     <<: *worker
     environment:
-      <<: *model-env
+      <<: [*model-env, *otel-env]
+      OTEL_SERVICE_NAME: wildebeest-detector
       WORKER_STAGE: detect
       COORDINATOR_URL: http://coordinator-lb:3000
       REDIS_URL: redis://redis:6379
@@ -169,7 +184,8 @@ services:
   classifier:
     <<: *worker
     environment:
-      <<: *model-env
+      <<: [*model-env, *otel-env]
+      OTEL_SERVICE_NAME: wildebeest-classifier
       WORKER_STAGE: classify
       COORDINATOR_URL: http://coordinator-lb:3000
       REDIS_URL: redis://redis:6379
@@ -185,6 +201,27 @@ services:
       resources:
         limits:
           memory: ${CLASSIFIER_MEM_LIMIT:-1300m}
+
+  # Observability (--profile observability): OTel collector, Tempo, Prometheus, Loki and Grafana in
+  # one dev container, with the Wildebeest dashboard provisioned and the coordinator's
+  # /metrics/prom scraped every 2 s. Grafana: http://localhost:${GRAFANA_PORT:-3300} (anonymous admin).
+  lgtm:
+    image: grafana/otel-lgtm:${LGTM_TAG:-latest}
+    profiles: [observability]
+    ports:
+      - "${GRAFANA_PORT:-3300}:3000"
+      - "${OTLP_GRPC_PORT:-4317}:4317"
+      - "${OTLP_HTTP_PORT:-4318}:4318"
+      - "${TEMPO_PORT:-3200}:3200"
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      - ./observability/grafana/wildebeest-dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/wildebeest.yaml:ro
+      - ./observability/grafana/dashboards:/otel-lgtm/wildebeest-dashboards:ro
+    deploy:
+      resources:
+        limits:
+          memory: ${LGTM_MEM_LIMIT:-1800m}
 
   dashboard:
     build: ./dashboard
