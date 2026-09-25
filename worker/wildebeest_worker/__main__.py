@@ -1,4 +1,4 @@
-"""Entrypoint: `python -m forgegrid_worker`, dispatching on WORKER_STAGE (detect | classify)."""
+"""Entrypoint: `python -m wildebeest_worker`, dispatching on WORKER_STAGE (detect | classify)."""
 
 import logging
 import os
@@ -54,7 +54,7 @@ def main() -> None:
         stream=sys.stdout,
     )
     warnings.filterwarnings("ignore")
-    log = logging.getLogger("forgegrid.worker")
+    log = logging.getLogger("wildebeest.worker")
 
     import redis
 

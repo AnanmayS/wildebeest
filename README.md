@@ -1,4 +1,4 @@
-# ForgeGrid
+# Wildebeest
 
 A fault-tolerant distributed pipeline that sorts wildlife camera-trap photos into "empty" and "41 zebras, 12 lions, 8 elephants" across a pool of Docker workers, and keeps going when a worker dies halfway through.
 
@@ -57,7 +57,7 @@ New workers register and start pulling work as soon as their model has loaded (a
 | 3000 | Coordinator API |
 | 9000 | MinIO S3 API (the browser loads presigned image URLs from it) |
 | 9001 | MinIO console (`minioadmin` / `minioadmin`) |
-| 15432 | Postgres (`forgegrid` / `forgegrid`) |
+| 15432 | Postgres (`wildebeest` / `wildebeest`) |
 | 16379 | Redis |
 
 Postgres and Redis publish on non-default host ports so they don't collide with local installs. Override them with `POSTGRES_HOST_PORT` and `REDIS_HOST_PORT`.
@@ -118,7 +118,7 @@ Postgres is the source of truth. Every transition is a single guarded `UPDATE ..
 - If a worker dies between `BLMOVE` and claim-confirm, the reaper drains its processing list back to the ready queue (`LRANGE` + `DEL` in one `MULTI`).
 - Duplicate IDs in a queue are harmless: the second copy finds the task no longer `PENDING` and is skipped.
 
-Source: [worker/forgegrid_worker/runtime.py](worker/forgegrid_worker/runtime.py) (`claim_ids`), [coordinator/src/tasks.ts](coordinator/src/tasks.ts) (`claimConfirm`), [coordinator/src/workers.ts](coordinator/src/workers.ts) (`drainProcessingList`).
+Source: [worker/wildebeest_worker/runtime.py](worker/wildebeest_worker/runtime.py) (`claim_ids`), [coordinator/src/tasks.ts](coordinator/src/tasks.ts) (`claimConfirm`), [coordinator/src/workers.ts](coordinator/src/workers.ts) (`drainProcessingList`).
 
 ### Leases, heartbeats and the reaper
 
@@ -165,14 +165,14 @@ Tasks are not pushed to Redis when they are created. The dispatcher ([coordinato
 
 Throttle changes are logged, written as events, and shown on the dashboard.
 
-Redis only holds derived state. If it loses its data, the dispatcher notices the missing `forgegrid:queues-built` sentinel on its next tick and rebuilds the ready queues from Postgres.
+Redis only holds derived state. If it loses its data, the dispatcher notices the missing `wildebeest:queues-built` sentinel on its next tick and rebuilds the ready queues from Postgres.
 
 ### Graceful SIGTERM vs SIGKILL
 
 - **SIGTERM** (`docker compose stop`, or scaling down): the worker stops claiming, finishes its in-flight task, reports it, and calls `/workers/:id/deregister`. The coordinator marks it `STOPPED` and returns any unstarted leases to `PENDING` without using an attempt. Compose allows 12 s (`stop_grace_period`) before it escalates to SIGKILL.
 - **SIGKILL** (the dashboard's Kill button and chaos mode, via dockerode): nothing runs on the worker. The heartbeats stop, the reaper declares it `DEAD` within about 6 s, and its tasks are reassigned. Chaos mode never kills the last live worker of a stage, because workers use `restart: "no"`.
 
-Source: [worker/forgegrid_worker/runtime.py](worker/forgegrid_worker/runtime.py) (`_on_signal`, `run_once`), [coordinator/src/docker.ts](coordinator/src/docker.ts), [coordinator/src/chaos.ts](coordinator/src/chaos.ts).
+Source: [worker/wildebeest_worker/runtime.py](worker/wildebeest_worker/runtime.py) (`_on_signal`, `run_once`), [coordinator/src/docker.ts](coordinator/src/docker.ts), [coordinator/src/chaos.ts](coordinator/src/chaos.ts).
 
 ## Results
 
@@ -202,7 +202,7 @@ Two sweeps, both with a cleared cache before each run ([benchmarks/results.md](b
 
 **Where scaling flattens, and why.** The orchestration layer scales linearly: with a fake model, 8 detectors run 8.01× faster than 1 and per-task latency stays flat (~330 ms), so the coordinator, Redis and Postgres are not the bottleneck at this size. With real models, throughput is flat from the first worker: 1.21 img/s with 1 detector, 1.34 img/s at best, while each worker's per-image time grows in proportion to the worker count. The limit is the laptop, not the design. Running bare MegaDetector in 1, 2 and 4 containers side by side, with no pipeline at all, tops out at the same place:
 
-| Bare MegaDetector processes (no ForgeGrid) | Per-image time | Aggregate |
+| Bare MegaDetector processes (no Wildebeest) | Per-image time | Aggregate |
 | --- | --- | --- |
 | 1 × 2 threads | 0.67 s | 1.49 img/s |
 | 2 × 2 threads | 1.26–1.30 s | 1.56 img/s |
@@ -251,7 +251,7 @@ The baseline ran MegaDetector at its native 1280 px. The containers default to 6
 │   ├── migrations/        001_init.sql
 │   └── test/              Vitest suites
 ├── worker/                Python: shared runtime + detector/classifier handlers
-│   ├── forgegrid_worker/  runtime.py, detector.py, classifier.py, labels.py, fake.py
+│   ├── wildebeest_worker/  runtime.py, detector.py, classifier.py, labels.py, fake.py
 │   └── tests/             pytest
 ├── dashboard/             React + Vite + Tailwind, served by nginx
 ├── scripts/               download_sample.py, baseline.py, benchmark.ts, plot_benchmark.py

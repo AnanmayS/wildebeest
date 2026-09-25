@@ -17,14 +17,14 @@ function str(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   return {
     port: num(env, "PORT", 3000),
-    databaseUrl: str(env, "DATABASE_URL", "postgres://forgegrid:forgegrid@localhost:5432/forgegrid"),
+    databaseUrl: str(env, "DATABASE_URL", "postgres://wildebeest:wildebeest@localhost:5432/wildebeest"),
     redisUrl: str(env, "REDIS_URL", "redis://localhost:6379"),
 
     s3Endpoint: str(env, "S3_ENDPOINT", "http://localhost:9000"),
     s3PublicEndpoint: str(env, "S3_PUBLIC_ENDPOINT", str(env, "S3_ENDPOINT", "http://localhost:9000")),
     s3AccessKey: str(env, "S3_ACCESS_KEY", "minioadmin"),
     s3SecretKey: str(env, "S3_SECRET_KEY", "minioadmin"),
-    s3Bucket: str(env, "S3_BUCKET", "forgegrid"),
+    s3Bucket: str(env, "S3_BUCKET", "wildebeest"),
     sampleDir: str(env, "SAMPLE_DIR", "/data/sample"),
 
     detectorModelVersion: str(env, "DETECTOR_MODEL_VERSION", "speciesnet-md_v5a"),

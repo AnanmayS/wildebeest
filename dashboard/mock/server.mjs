@@ -1,4 +1,4 @@
-// Dev-only mock of the ForgeGrid coordinator's dashboard API (docs/CONTRACTS.md).
+// Dev-only mock of the Wildebeest coordinator's dashboard API (docs/CONTRACTS.md).
 // Simulates a job moving through detect -> classify, workers that can be killed,
 // reassignment, stale-lease rejections, cache hits, backpressure and chaos mode.
 //
@@ -467,7 +467,7 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`ForgeGrid mock coordinator on http://localhost:${PORT}`);
+  console.log(`Wildebeest mock coordinator on http://localhost:${PORT}`);
   const auto = Number(process.env.MOCK_AUTOSTART ?? 0);
   if (auto) createJob(`sample-${auto}`, Array.from({ length: auto }, (_, i) => i), auto);
 });

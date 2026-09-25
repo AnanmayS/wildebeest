@@ -24,7 +24,7 @@ const DETECTORS = (process.env.BENCH_DETECTORS ?? "1,2,3,4").split(",").map(Numb
 const RECOVERY_DETECTORS = Number(process.env.BENCH_RECOVERY_DETECTORS ?? 4);
 const RECOVERY_IMAGES = Number(process.env.BENCH_RECOVERY_IMAGES ?? 300);
 const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL ?? "postgres://forgegrid:forgegrid@localhost:15432/forgegrid",
+  connectionString: process.env.DATABASE_URL ?? "postgres://wildebeest:wildebeest@localhost:15432/wildebeest",
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

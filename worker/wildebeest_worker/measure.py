@@ -1,6 +1,6 @@
 """Measure one worker type's memory and latency without a coordinator.
 
-    python -m forgegrid_worker.measure --stage detect --images /data/sample --n 10
+    python -m wildebeest_worker.measure --stage detect --images /data/sample --n 10
 
 Loads the model the same way the worker does, runs it on N images and prints
 model load time, RSS after load, peak RSS and per-image latency.

@@ -4,7 +4,7 @@ Runs the same two-stage pipeline the distributed workers run, in one process:
   1. MegaDetector on every image;
   2. if an animal box >= ANIMAL_CONF_THRESHOLD, SpeciesNet classifier on the top
      animal crop + the package's ensemble/geofence (country TZA).
-It reuses the worker's model wrappers (worker/forgegrid_worker), so the numbers
+It reuses the worker's model wrappers (worker/wildebeest_worker), so the numbers
 describe exactly the code that runs in the containers.
 
 Writes benchmarks/baseline_predictions.csv (resumable: rows already there are
@@ -28,8 +28,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "worker"))
 warnings.filterwarnings("ignore")
 
-from forgegrid_worker.labels import final_category, top_animal  # noqa: E402
-from forgegrid_worker.storage import open_rgb  # noqa: E402
+from wildebeest_worker.labels import final_category, top_animal  # noqa: E402
+from wildebeest_worker.storage import open_rgb  # noqa: E402
 
 SAMPLE_DIR = ROOT / "data" / "sample"
 PRED_CSV = ROOT / "benchmarks" / "baseline_predictions.csv"
@@ -57,8 +57,8 @@ def run(rows: list[dict]) -> float:
     """Run the models over rows not yet in PRED_CSV. Returns model load seconds."""
     import torch
 
-    from forgegrid_worker.classifier import SpeciesNetClassifierModel
-    from forgegrid_worker.detector import SpeciesNetDetectorModel
+    from wildebeest_worker.classifier import SpeciesNetClassifierModel
+    from wildebeest_worker.detector import SpeciesNetDetectorModel
 
     done = set()
     if PRED_CSV.exists():
@@ -216,7 +216,7 @@ def report(rows: list[dict], load_s: float, subset_note: str) -> str:
         "",
         "Ground truth is the Snapshot Serengeti sequence label (`common_name` in `data/sample/labels.csv`:",
         "`gazellethomsons`/`gazellegrants` → gazelle, `lionfemale`/`lionmale` → lion, `hyenaspotted`/`hyenastriped` → hyena).",
-        "SpeciesNet predictions go through `forgegrid_worker.labels.common_name()`, which maps the taxonomy",
+        "SpeciesNet predictions go through `wildebeest_worker.labels.common_name()`, which maps the taxonomy",
         "string by genus/family: any zebra → zebra, *Connochaetes* → wildebeest, *Panthera leo* → lion,",
         "Elephantidae → elephant, Giraffidae → giraffe, *Eudorcas*/*Nanger*/*Gazella* → gazelle, *Syncerus* → buffalo,",
         "*Crocuta*/*Hyaena*/*Parahyaena* (or the Hyaenidae roll-up) → hyena, *Phacochoerus* → warthog, *Aepyceros* → impala.",

@@ -18,7 +18,7 @@ export type LiveJob = JobSummary & { receivedAt: number };
  * All live state for the dashboard. Primary source is the /api/events WebSocket;
  * REST polling every 2 s is the fallback so the page keeps working if the socket drops.
  */
-export function useForgeGrid() {
+export function useWildebeest() {
   const [job, setJob] = useState<LiveJob | null>(null);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [events, setEvents] = useState<TaskEvent[]>([]);

@@ -5,10 +5,10 @@ import PIL.Image
 import pytest
 import requests
 
-from forgegrid_worker.classifier import crop_key_for, make_classify_handler
-from forgegrid_worker.detector import make_detect_handler
-from forgegrid_worker.fake import FakeClassifier, FakeDetector, fake_detections
-from forgegrid_worker.runtime import Worker
+from wildebeest_worker.classifier import crop_key_for, make_classify_handler
+from wildebeest_worker.detector import make_detect_handler
+from wildebeest_worker.fake import FakeClassifier, FakeDetector, fake_detections
+from wildebeest_worker.runtime import Worker
 
 
 class Resp:

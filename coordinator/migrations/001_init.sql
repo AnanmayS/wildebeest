@@ -1,4 +1,4 @@
--- ForgeGrid schema (PRD section 9 plus the coordinator's bookkeeping columns).
+-- Wildebeest schema (PRD section 9 plus the coordinator's bookkeeping columns).
 
 create table jobs (
   id            uuid primary key,

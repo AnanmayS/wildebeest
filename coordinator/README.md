@@ -1,4 +1,4 @@
-# ForgeGrid coordinator
+# Wildebeest coordinator
 
 Node/TypeScript service that owns all task state. Workers only ever `BLMOVE` task IDs out of Redis;
 every state change goes through this service's HTTP API (see `docs/CONTRACTS.md`).
@@ -7,7 +7,7 @@ every state change goes through this service's HTTP API (see `docs/CONTRACTS.md`
 src/
   config.ts      env + defaults (mutable object, tests shorten timeouts)
   db.ts          pg pool, tx helper, SQL migration runner (migrations/*.sql, schema_migrations)
-  redis.ts       key names: queue:{stage}, processing:{workerId}, worker:{id}:alive, forgegrid:throttled
+  redis.ts       key names: queue:{stage}, processing:{workerId}, worker:{id}:alive, wildebeest:throttled
   storage.ts     MinIO: ensure bucket, idempotent put, cached presigned URLs (S3_PUBLIC_ENDPOINT)
   jobs.ts        job creation (upload / sample), cache lookup, JobSummary + gallery queries
   tasks.ts       the state machine: claimConfirm, completeTask, failTask, requeueLostLeases, release
@@ -52,6 +52,6 @@ docker compose up -d postgres redis minio     # from the repo root
 cd coordinator && npm install && npm test
 ```
 
-The test run recreates a database called `forgegrid_test`, flushes Redis DB 15 and uses the bucket
-`forgegrid-test`. It connects to `localhost:15432`, `localhost:16379` and `localhost:9000`, which
+The test run recreates a database called `wildebeest_test`, flushes Redis DB 15 and uses the bucket
+`wildebeest-test`. It connects to `localhost:15432`, `localhost:16379` and `localhost:9000`, which
 you can override with `TEST_DATABASE_URL`, `TEST_REDIS_URL` and `TEST_S3_ENDPOINT`.

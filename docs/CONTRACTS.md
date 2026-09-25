@@ -1,4 +1,4 @@
-# ForgeGrid interface contracts
+# Wildebeest interface contracts
 
 This file pins down the details the PRD (docs/PRD.md) leaves open, so the coordinator,
 workers, and dashboard can be built in parallel and still fit together. If you must
@@ -8,9 +8,9 @@ change a contract, change it here and note it in docs/DECISIONS.md.
 
 | Service     | Image/build     | Port (host) | Notes |
 |-------------|-----------------|-------------|-------|
-| postgres    | postgres:16     | 15432       | db `forgegrid`, user/pass `forgegrid`/`forgegrid` |
+| postgres    | postgres:16     | 15432       | db `wildebeest`, user/pass `wildebeest`/`wildebeest` |
 | redis       | redis:7         | 16379       | host ports moved off 5432/6379, which are commonly taken |
-| minio       | pgsty/minio     | 9000, 9001  | user/pass `minioadmin`/`minioadmin`, bucket `forgegrid` (coordinator creates it at startup) |
+| minio       | pgsty/minio     | 9000, 9001  | user/pass `minioadmin`/`minioadmin`, bucket `wildebeest` (coordinator creates it at startup) |
 | coordinator | ./coordinator   | 3000        | mounts `/var/run/docker.sock` and `./data/sample:/data/sample:ro` |
 | detector    | ./worker        | none        | `WORKER_STAGE=detect`, scalable, `restart: "no"` |
 | classifier  | ./worker        | none        | `WORKER_STAGE=classify`, scalable, `restart: "no"` |
@@ -24,13 +24,13 @@ Workers reach the coordinator at `COORDINATOR_URL=http://coordinator:3000`, Redi
 PRD section 13 defaults plus:
 
 ```
-DATABASE_URL=postgres://forgegrid:forgegrid@postgres:5432/forgegrid
+DATABASE_URL=postgres://wildebeest:wildebeest@postgres:5432/wildebeest
 REDIS_URL=redis://redis:6379
 S3_ENDPOINT=http://minio:9000
 S3_PUBLIC_ENDPOINT=http://localhost:9000   # used only to sign URLs the browser loads
 S3_ACCESS_KEY=minioadmin
 S3_SECRET_KEY=minioadmin
-S3_BUCKET=forgegrid
+S3_BUCKET=wildebeest
 SAMPLE_DIR=/data/sample                     # contains *.jpg + labels.csv
 DETECT_QUEUE_TARGET=50                      # dispatcher keeps queue:detect at most this long
 MODEL_BACKEND=speciesnet                    # worker: speciesnet | fake (fake = deterministic, for fast tests)
@@ -50,7 +50,7 @@ FAKE_MODEL_DELAY_MS=300                     # worker, fake backend only
 - The coordinator stores results under its own env version (it trusts env, and ignores a mismatched
   worker-reported version except to log a warning).
 
-## Object storage keys (bucket `forgegrid`)
+## Object storage keys (bucket `wildebeest`)
 
 - `images/{sha256}.jpg` — original upload (coordinator writes)
 - `crops/{sha256}_{classifierModelVersion}.jpg` — classifier crop thumbnail (worker writes;
@@ -62,7 +62,7 @@ FAKE_MODEL_DELAY_MS=300                     # worker, fake backend only
 - `processing:{workerId}` — list; worker moves an ID here with
   `BLMOVE queue:{stage} processing:{workerId} LEFT RIGHT 1` (1s timeout, loop).
 - `worker:{id}:alive` — string, TTL `3 × HEARTBEAT_MS`, set by the coordinator on register/heartbeat.
-- `forgegrid:throttled` — "1" while backpressure is engaged (informational; coordinator is the source).
+- `wildebeest:throttled` — "1" while backpressure is engaged (informational; coordinator is the source).
 
 Workers only ever do BLMOVE (and nothing else) against Redis. All other Redis mutation is the coordinator's.
 When a claim-confirm, complete, or fail request is handled, the coordinator `LREM`s that task ID from

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { LiveJob } from '../hooks/useForgeGrid';
+import type { LiveJob } from '../hooks/useWildebeest';
 import { useNow } from '../hooks/useNow';
 import { useTween } from '../hooks/useTween';
 import { fmtDuration, fmtInt, fmtPct, fmtReviewTime } from '../lib/format';

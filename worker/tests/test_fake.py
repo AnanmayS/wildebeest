@@ -3,8 +3,8 @@ from collections import Counter
 
 import pytest
 
-from forgegrid_worker.fake import FakeClassifier, FakeDetector, fake_classification, fake_detections
-from forgegrid_worker.labels import TARGET_SPECIES, final_category
+from wildebeest_worker.fake import FakeClassifier, FakeDetector, fake_classification, fake_detections
+from wildebeest_worker.labels import TARGET_SPECIES, final_category
 
 
 def sha(i: int) -> str:

@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { uploadPhotos } from '../lib/api';
-import type { Connection } from '../hooks/useForgeGrid';
+import type { Connection } from '../hooks/useWildebeest';
 import { Logo } from './Logo';
 
 const SIZES = [500, 1000, 2000];
@@ -50,7 +50,7 @@ export function Header({ connection, lastSampleSize, onStartSample, onUploaded, 
         <Logo />
         <div className="min-w-0">
           <div className="flex items-baseline gap-3">
-            <h1 className="text-[26px] font-semibold leading-none tracking-tight">ForgeGrid</h1>
+            <h1 className="text-[26px] font-semibold leading-none tracking-tight">Wildebeest</h1>
             <ConnectionPill connection={connection} />
           </div>
           <p className="mt-1.5 max-w-[600px] text-[13px] leading-snug text-ink-400">

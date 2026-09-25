@@ -1,7 +1,7 @@
 import pytest
 
-from forgegrid_worker.fake import FAKE_LABELS
-from forgegrid_worker.labels import TARGET_SPECIES, common_name, final_category, top_animal
+from wildebeest_worker.fake import FAKE_LABELS
+from wildebeest_worker.labels import TARGET_SPECIES, common_name, final_category, top_animal
 
 UUID = "00000000-0000-0000-0000-000000000000"
 

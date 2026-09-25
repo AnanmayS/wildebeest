@@ -4,10 +4,10 @@ import { Header } from './components/Header';
 import { JobPanel } from './components/JobPanel';
 import { SpeciesLeaderboard } from './components/SpeciesLeaderboard';
 import { WorkerGrid } from './components/WorkerGrid';
-import { useForgeGrid } from './hooks/useForgeGrid';
+import { useWildebeest } from './hooks/useWildebeest';
 
 export default function App() {
-  const live = useForgeGrid();
+  const live = useWildebeest();
   const { job } = live;
   // Prefer the explicit field; older coordinators only encode it in the name ("sample-1000").
   const lastSampleSize = job ? (job.sampleSize ?? (Number(job.name.match(/^sample-(\d+)$/)?.[1]) || null)) : null;

@@ -64,7 +64,7 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
    and the classifier's top 5. The ensemble can answer `blank` (classifier very sure there is no animal) — in the
    baseline this happened for 62 of 140 false-positive detections and for 0 of 582 real animals, so the
    coordinator could finalise `commonName == "blank"` as `empty` (+3.1 points of empty-vs-animal accuracy).
-26. **Worker: common names.** `forgegrid_worker.labels.common_name()` collapses SpeciesNet taxonomy strings to the
+26. **Worker: common names.** `wildebeest_worker.labels.common_name()` collapses SpeciesNet taxonomy strings to the
    ground-truth vocabulary by genus/family (any zebra, *Connochaetes* → wildebeest, *Panthera leo* → lion,
    Elephantidae → elephant, Giraffidae → giraffe, *Eudorcas*/*Nanger*/*Gazella* → gazelle, *Syncerus* → buffalo,
    *Crocuta*/*Hyaena*/*Parahyaena*/Hyaenidae → hyena, *Phacochoerus* → warthog, *Aepyceros* → impala); special
@@ -87,7 +87,7 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
    are `{stage}-{hostname}`, so it gets the same ID back; the coordinator releases anything the old incarnation held). `/complete`, `/fail` and heartbeats retry up to 5 times on connection errors only;
    `/workers/register` retries for up to 120 s at startup.
 31. **Worker memory, latency and capacity (measured).** In the linux/arm64 image on Docker Desktop (Apple M2,
-   8 vCPU, 8 GB), `python -m forgegrid_worker.measure`, `TORCH_NUM_THREADS=2`:
+   8 vCPU, 8 GB), `python -m wildebeest_worker.measure`, `TORCH_NUM_THREADS=2`:
    | | Detector (MegaDetector v5a, 1280 px) | Classifier (SpeciesNet v4.0.3a + ensemble) |
    |---|---|---|
    | RSS after model load | 1.08–1.10 GB | 0.81 GB |
@@ -138,7 +138,7 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
    On this 8-vCPU / 8 GB VM, 4 detectors × 2 torch threads already saturate the CPU, so the flattening point is visible.
    `BENCH_DETECTORS=1,2,4,6,8` runs the full sweep on a bigger machine.
 40. **Redis data loss is detected and repaired without a restart.** Whenever the queues are built from Postgres the
-   coordinator sets `forgegrid:queues-built`. Each dispatcher tick checks it; if it is gone (Redis restarted without
+   coordinator sets `wildebeest:queues-built`. Each dispatcher tick checks it; if it is gone (Redis restarted without
    persistence, or was flushed), the dispatcher runs the same rebuild as startup: clear the ready queues and mark every
    `PENDING` task unqueued so it is pushed again. Duplicate IDs this may create are harmless.
 41. **CPU inference tuning: channels_last, nothing else.** Measured in the worker image (linux/arm64 on an M2,
@@ -153,8 +153,11 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
    | ONNX Runtime, opset 17, 2 intra-op threads (± arm64 bf16 GEMM) | 0.97–0.99 s | – |
    | 1 / 4 torch threads | 0.92 s / 0.61 s | – |
 
-   Only channels_last is adopted (`worker/forgegrid_worker/tuning.py`). The VM does expose bf16/i8mm, but oneDNN's
+   Only channels_last is adopted (`worker/wildebeest_worker/tuning.py`). The VM does expose bf16/i8mm, but oneDNN's
    bf16 path was slower for these convolutions. Two threads per worker stays the default: 4 threads buys ~8%, so on
    8 vCPUs more 2-thread workers beat fewer 4-thread ones. Not tried: MegaDetector v1000 "cedar" (YOLOv9c, ~half the
    FLOPs, GPL) — it needs threshold retuning and a new accuracy baseline, and its author reports only ~2× over MDv5a
    at 1280, which is what 640 px already buys; a smaller model's main win here would be memory, i.e. more workers.
+42. **Renamed ForgeGrid → Wildebeest.** The herd keeps moving when one animal falls, which is the fault-tolerance
+   story, and the sample data is Serengeti. Renamed everywhere (package `wildebeest_worker`, database, bucket, Redis
+   keys, images). `docs/PRD.md` keeps the original name because it is a copy of the source spec.

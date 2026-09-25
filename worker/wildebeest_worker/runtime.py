@@ -25,7 +25,7 @@ from typing import Callable
 
 import requests
 
-log = logging.getLogger("forgegrid.worker")
+log = logging.getLogger("wildebeest.worker")
 
 Handler = Callable[[dict], dict]  # lease -> result (without latencyMs)
 

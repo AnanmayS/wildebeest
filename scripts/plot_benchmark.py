@@ -28,7 +28,7 @@ ax.set_ylabel("Throughput (images/sec)")
 ax.set_title(
     f"Orchestration scaling, fake 300 ms model ({rows[0]['images']} images)"
     if FAKE
-    else f"ForgeGrid throughput vs workers ({rows[0]['images']} images, CPU)"
+    else f"Wildebeest throughput vs workers ({rows[0]['images']} images, CPU)"
 )
 ax.set_xticks(workers)
 ax.set_ylim(0, max(throughput + [base * workers[-1]]) * 1.15)

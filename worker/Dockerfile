@@ -26,6 +26,6 @@ ARG SPECIESNET_MODEL=kaggle:google/speciesnet/pyTorch/v4.0.3a/1
 ENV SPECIESNET_MODEL=${SPECIESNET_MODEL}
 RUN python -W ignore -c "import os; from speciesnet.utils import ModelInfo; print(ModelInfo(os.environ['SPECIESNET_MODEL']))"
 
-COPY forgegrid_worker ./forgegrid_worker
+COPY wildebeest_worker ./wildebeest_worker
 
-CMD ["python", "-m", "forgegrid_worker"]
+CMD ["python", "-m", "wildebeest_worker"]

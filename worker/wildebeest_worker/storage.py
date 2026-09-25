@@ -23,7 +23,7 @@ class Storage:
         import boto3
         from botocore.config import Config
 
-        self.bucket = os.environ.get("S3_BUCKET", "forgegrid")
+        self.bucket = os.environ.get("S3_BUCKET", "wildebeest")
         self.s3 = boto3.client(
             "s3",
             endpoint_url=os.environ.get("S3_ENDPOINT", "http://minio:9000"),

@@ -1,9 +1,9 @@
 import pg from "pg";
 
-// Recreates the forgegrid_test database once per `npm test` run. Migrations are applied by
+// Recreates the wildebeest_test database once per `npm test` run. Migrations are applied by
 // the test helpers (through the real migrate()), so they are exercised too.
 export default async function setup() {
-  const url = new URL(process.env.TEST_DATABASE_URL ?? "postgres://forgegrid:forgegrid@localhost:15432/forgegrid_test");
+  const url = new URL(process.env.TEST_DATABASE_URL ?? "postgres://wildebeest:wildebeest@localhost:15432/wildebeest_test");
   const dbName = url.pathname.slice(1);
   const admin = new URL(url);
   admin.pathname = "/postgres";

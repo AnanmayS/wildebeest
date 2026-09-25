@@ -7,9 +7,9 @@ export const keys = {
   queue: (stage: string) => `queue:${stage}`,
   processing: (workerId: string) => `processing:${workerId}`,
   alive: (workerId: string) => `worker:${workerId}:alive`,
-  throttled: "forgegrid:throttled",
+  throttled: "wildebeest:throttled",
   // Set whenever the queues are (re)built from Postgres. If it disappears, Redis lost its data.
-  queuesBuilt: "forgegrid:queues-built",
+  queuesBuilt: "wildebeest:queues-built",
 };
 
 let client: Redis | null = null;

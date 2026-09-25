@@ -45,7 +45,7 @@ sent to stage 2 (the same work the distributed pipeline does); model load is exc
 
 Ground truth is the Snapshot Serengeti sequence label (`common_name` in `data/sample/labels.csv`:
 `gazellethomsons`/`gazellegrants` → gazelle, `lionfemale`/`lionmale` → lion, `hyenaspotted`/`hyenastriped` → hyena).
-SpeciesNet predictions go through `forgegrid_worker.labels.common_name()`, which maps the taxonomy
+SpeciesNet predictions go through `wildebeest_worker.labels.common_name()`, which maps the taxonomy
 string by genus/family: any zebra → zebra, *Connochaetes* → wildebeest, *Panthera leo* → lion,
 Elephantidae → elephant, Giraffidae → giraffe, *Eudorcas*/*Nanger*/*Gazella* → gazelle, *Syncerus* → buffalo,
 *Crocuta*/*Hyaena*/*Parahyaena* (or the Hyaenidae roll-up) → hyena, *Phacochoerus* → warthog, *Aepyceros* → impala.

@@ -9,7 +9,7 @@ import pg from "pg";
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const API = process.env.COORDINATOR_URL ?? "http://localhost:3000";
 export const DATABASE_URL =
-  process.env.DATABASE_URL ?? "postgres://forgegrid:forgegrid@localhost:15432/forgegrid";
+  process.env.DATABASE_URL ?? "postgres://wildebeest:wildebeest@localhost:15432/wildebeest";
 export const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:16379";
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
