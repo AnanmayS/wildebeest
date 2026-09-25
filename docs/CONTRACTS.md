@@ -216,3 +216,88 @@ Event log types shown: `worker_died`, `reassigned`, `lease_expired`, `stale_reje
 - `GET /metrics` shape (minimum): `{ "throttled": bool, "queues": { "detect": n, "classify": n },
   "workers": { "alive": n, "dead": n }, "recoveryMs": [n…], "latency": { "p50": ms, "p95": ms } }`.
 - `/jobs/:id/images` ordering: most recently finalised first; `pageSize` default 48, max 200.
+
+---
+
+# v2 additions (improvement program, 2026-09-25)
+
+Owners: the coordinator agents implement these; the dashboard and benchmark agents consume them. Coordinator agents
+may refine *request/response details of the worker protocol*, but must keep every shape the dashboard reads
+(`system` snapshot, events, `/benchmarks`) exactly as written here, and must note any change in this file.
+
+## Worker protocol v2
+
+- Every `complete` (single or batch) may carry `timings`: `{ "claimMs": n, "fetchMs": n, "inferMs": n, "uploadMs": n }`
+  measured by the worker. The coordinator stores them with the task (`tasks.timings jsonb`) for the waterfall.
+- `POST /tasks/:id/complete` accepts optional `"next": k` → response `{ "ok": true, "leases": [Lease…] }`: the
+  coordinator claims up to k more tasks of the worker's stage for it in the same request (complete-and-claim-next).
+- `POST /tasks/complete-batch` `{ "workerId", "items": [{ "taskId", "leaseEpoch", "result", "timings" }], "next": k }`
+  → `{ "results": [{ "taskId", "status": "ok" | "stale" | "invalid" }], "leases": [Lease…] }`. One stale row never fails the batch.
+- `POST /tasks/:id/release` `{ "workerId", "leaseEpoch", "reason" }` → back to PENDING **without** spending an attempt
+  (infrastructure errors: MinIO/S3 down, timeouts). Task errors still use `/fail`.
+- `CLAIM_MODE=hybrid|postgres` (coordinator env; default hybrid). In `postgres` mode there is no Redis ready queue:
+  workers call `POST /tasks/claim` `{ "workerId", "stage", "max": k, "waitMs": 1000 }` (long-poll) → `{ "leases": [...] }`,
+  implemented as one `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED LIMIT k) RETURNING`.
+- `POST /jobs/synthetic` `{ "count": n, "stage"?: "detect" }` → `{ "jobId" }`: n images with random sha256 and
+  `object_key = "synthetic/<sha>"`, no MinIO object. Fake-backend workers skip the image download for `synthetic/` keys.
+  Used by the orchestration-ceiling benchmark (0–50 ms fake tasks, up to ~1M tasks).
+- `POST /workers/:id/pause` `{ "ms": 20000 }` → `docker pause` the container for ms, then `docker unpause`
+  (a SIGSTOP-style freeze; demonstrates fencing on the dashboard). Events `worker_paused` / `worker_resumed`.
+- Worker death is detected from Docker `die`/`oom` events (filtered to this Compose project's label
+  `com.docker.compose.project`) as well as heartbeats. Event `worker_died` gains `detail.via`:
+  `"docker_event" | "heartbeat"` and `detail.detectMs` (ms from kill request or container death to detection).
+
+## `system` snapshot — the dashboard's main data
+
+`GET /system` and a WebSocket message `{ "type": "system", "system": SystemSnapshot }` pushed ~2×/s.
+
+```json
+{
+  "at": "2026-09-25T18:00:00.000Z",
+  "config": { "claimMode": "hybrid", "leaseMs": 15000, "heartbeatMs": 2000, "workerTimeoutMs": 6000,
+              "detectQueueTarget": 50, "classifyHighWater": 500, "classifyLowWater": 200, "modelBackend": "speciesnet" },
+  "dispatcher": { "mode": "push", "pushedLast10s": 120, "repairSweepsLast10s": 50, "lastSweepRepaired": 0 },
+  "queues": { "detect": 12, "classify": 3, "throttled": false },
+  "stages": {
+    "detect":   { "workersAlive": 3, "inFlight": 3, "completedPerSec": 1.1, "p50ServiceMs": 780 },
+    "classify": { "workersAlive": 1, "inFlight": 1, "completedPerSec": 0.3, "p50ServiceMs": 330 }
+  },
+  "leases": [ { "taskId": "…", "workerId": "detect-ab12", "stage": "detect", "epoch": 2, "ageMs": 640,
+                "attempt": 2, "imageUrl": "…" } ],
+  "timings": { "windowSec": 60, "samples": 214,
+               "p50": { "dispatchWaitMs": 3, "queueWaitMs": 410, "claimMs": 6, "fetchMs": 18, "inferMs": 690,
+                        "uploadMs": 0, "completeMs": 9, "totalMs": 1130 },
+               "p95": { "…same keys…": 0 },
+               "overheadPct": 3.4 },
+  "recovery": [ { "workerId": "detect-ab12", "killedAt": "…", "detectedAt": "…", "via": "docker_event",
+                  "requeuedAt": "…", "reclaimedAt": "…", "tasks": 1, "totalMs": 820 } ],
+  "fencing": { "staleRejected": 3, "last": { "taskId": "…", "workerId": "…", "epoch": 3, "currentEpoch": 4, "at": "…" } },
+  "invariants": { "checkedAt": "…", "duplicateResults": 0, "stuckLeases": 0, "lostImages": 0, "ok": true },
+  "throughput": [ { "t": "…", "detect": 1.2, "classify": 0.4, "images": 1.2 } ],
+  "cache": { "hitsLast10m": 300, "hitRatePct": 50.0 },
+  "speculation": { "launched": 0, "won": 0, "wasted": 0 },
+  "leader": { "id": "coord-1", "term": 7, "since": "…" }
+}
+```
+- `timings` p50/p95 come from the last `windowSec` of completed tasks: `dispatchWaitMs` = pushed − became PENDING,
+  `queueWaitMs` = claimed − pushed, `claimMs`/`fetchMs`/`inferMs`/`uploadMs` from the worker's `timings`,
+  `completeMs` = coordinator's handling time of the complete request. `overheadPct` = (claim + complete + dispatchWait)
+  ÷ total service time (excluding queue wait), as a percentage.
+- `leases` is capped at 40 (oldest first). `throughput` is the last 120 s at 1 s resolution.
+- `invariants` is a cheap live check (≤ every 5 s) over the active job(s): result rows per image > 1, LEASED tasks on
+  non-ALIVE workers past timeout + 2 reaper ticks, images with no task and no final category.
+- `leader` is null until coordinator HA exists. `speculation` zeros until speculation exists.
+
+## `GET /benchmarks`
+
+Serves `benchmarks/summary.json` (mounted read-only into the coordinator at `/benchmarks`), or 404 if absent.
+Produced by the benchmark harness:
+```json
+{ "generatedAt": "…", "machine": "Apple M2, Docker Desktop 8 vCPU / 8 GB",
+  "ceiling": { "taskMs": [0, 5, 50], "series": [ { "taskMs": 0, "points": [ { "workers": 1, "throughput": 180.2, "p50Ms": 4.1, "p99Ms": 9.8 } ] } ],
+               "usl": { "taskMs": 0, "lambda": 190.0, "alpha": 0.02, "beta": 0.0004 } },
+  "real": { "points": [ { "detectors": 1, "classifiers": 1, "throughput": 1.21 } ] },
+  "recovery": { "before": { "p50Ms": 6400, "p95Ms": 8700, "samples": 1 }, "after": { "p50Ms": 800, "p95Ms": 1400, "samples": 20 } },
+  "overhead": { "before": { "perTaskMs": 46 }, "after": { "perTaskMs": 8 } },
+  "faults": { "runs": 12, "faultsInjected": 60, "violations": 0 } }
+```

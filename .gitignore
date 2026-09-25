@@ -10,3 +10,5 @@ data/metadata/
 .env
 .DS_Store
 coverage/
+research_notes/
+reports/
