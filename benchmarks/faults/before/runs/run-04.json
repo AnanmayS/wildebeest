@@ -1,0 +1,150 @@
+{
+  "run": 4,
+  "jobId": "4331fbbf-0057-4473-8fcb-01e64be581c2",
+  "images": 1200,
+  "faults": [
+    {
+      "type": "latency",
+      "start": 1790374079.681303,
+      "target": "coordinator",
+      "end": 1790374089.723857,
+      "duration_s": 10.0
+    },
+    {
+      "type": "redis",
+      "start": 1790374096.127095,
+      "end": 1790374097.659384,
+      "duration_s": 1.5
+    },
+    {
+      "type": "coordinator",
+      "start": 1790374102.3677309,
+      "end": 1790374104.400071,
+      "duration_s": 2.0
+    },
+    {
+      "type": "minio",
+      "start": 1790374111.104191,
+      "end": 1790374141.594433,
+      "duration_s": 30.5
+    },
+    {
+      "type": "reset",
+      "start": 1790374146.504909,
+      "target": "redis",
+      "end": 1790374151.54273,
+      "duration_s": 5.0
+    }
+  ],
+  "faultsInjected": 5,
+  "jobStatus": "running",
+  "finishAfterFaultsS": 300.6,
+  "wallS": 388.3,
+  "stats": {
+    "tasks": 1521,
+    "images": 1200,
+    "failedImages": 7,
+    "staleRejected": 0,
+    "reassigned": 0,
+    "leaseExpired": 0,
+    "claims": 1536,
+    "succeeded": 1510,
+    "reexecutions": 19
+  },
+  "unverifiableCompletions": 0,
+  "liveSamples": 369,
+  "violations": [
+    {
+      "invariant": "I7 job_finishes",
+      "subject": "4331fbbf-0057-4473-8fcb-01e64be581c2",
+      "detail": "job running 300 s after the last fault; 4 unfinished: 4d001a76 classify PENDING queued=True epoch=0 \u2192 processing:classify-d3ec79630e21 (ALIVE); 917c89c4 detect PENDING queued=True epoch=0 \u2192 processing:detect-f0ab184814a2 (ALIVE); ed1f05bf detect PENDING queued=True epoch=0 \u2192 processing:detect-b2e270f94186 (ALIVE); 50b2105e detect PENDING queued=True epoch=0 \u2192 processing:detect-e1950353d56f (ALIVE)"
+    }
+  ],
+  "workerLogs": {
+    "f0ab184814a2": [
+      "2026-09-25 22:10:20,125 INFO wildebeest.worker: task 1ff720d4-ffd5-4b61-8cb4-6626946fbf56 done in 250 ms",
+      "2026-09-25 22:10:20,361 INFO wildebeest.worker: task 7c346264-03de-46d0-9bf3-54d097cecc8c done in 227 ms",
+      "2026-09-25 22:10:20,614 INFO wildebeest.worker: task 9a4a700e-01bb-4437-8927-0c587245a6ec done in 236 ms",
+      "2026-09-25 22:10:20,890 INFO wildebeest.worker: task f378c61e-9703-4808-914d-1e71f83880fb done in 264 ms",
+      "2026-09-25 22:10:21,129 INFO wildebeest.worker: task b452645f-00b8-458b-b08d-74091ef9db9c done in 232 ms",
+      "2026-09-25 22:10:21,354 INFO wildebeest.worker: task 1d30170d-9fb4-441e-a73c-e2724fd8e1bd done in 219 ms",
+      "2026-09-25 22:10:21,577 INFO wildebeest.worker: task 1b9f6174-0367-410a-91db-eea73cbe1a10 done in 218 ms",
+      "2026-09-25 22:10:21,808 INFO wildebeest.worker: task 37d0557c-f2d1-42e7-b4c7-8822becefbc2 done in 224 ms",
+      "2026-09-25 22:10:22,048 INFO wildebeest.worker: task 6e60ac36-4d50-4c7f-a4a4-5b1115737ef4 done in 232 ms",
+      "2026-09-25 22:10:22,275 INFO wildebeest.worker: task 4c67aa57-5a99-42dd-9a90-30b31cc2a1dd done in 219 ms",
+      "2026-09-25 22:10:22,502 INFO wildebeest.worker: task 227d88f2-00c0-4de1-9042-7a10ea4ef387 done in 220 ms",
+      "2026-09-25 22:10:22,730 INFO wildebeest.worker: task fdffd906-c1f0-4559-a4c6-7ec08d39f6c0 done in 221 ms",
+      "2026-09-25 22:10:22,969 INFO wildebeest.worker: task fa51f89d-c5da-409b-b56e-e5eaaeae809d done in 230 ms",
+      "2026-09-25 22:10:23,204 INFO wildebeest.worker: task bd44a3fe-bef4-4a83-a46c-5c51321bc6ac done in 226 ms",
+      "2026-09-25 22:10:23,441 INFO wildebeest.worker: task e76aaf07-dc49-45f9-9353-28475a9fcba1 done in 229 ms"
+    ],
+    "e1950353d56f": [
+      "2026-09-25 22:10:20,058 INFO wildebeest.worker: task b0befdb4-9573-436b-9f51-4afe5d935eeb done in 239 ms",
+      "2026-09-25 22:10:20,296 INFO wildebeest.worker: task 544f5c70-6146-4366-8850-b188a62ea1f3 done in 227 ms",
+      "2026-09-25 22:10:20,535 INFO wildebeest.worker: task 175db76b-88a1-49d9-9677-b9c715b4c937 done in 223 ms",
+      "2026-09-25 22:10:20,819 INFO wildebeest.worker: task 11af2148-a0e6-4216-b4f6-3721ecd30778 done in 266 ms",
+      "2026-09-25 22:10:21,071 INFO wildebeest.worker: task f2e0baad-8eb4-4c84-b8ee-f1dfe12ec737 done in 236 ms",
+      "2026-09-25 22:10:21,300 INFO wildebeest.worker: task 2077653b-0242-47bb-8b1f-61ff236aa95a done in 221 ms",
+      "2026-09-25 22:10:21,527 INFO wildebeest.worker: task 8bc94906-dd77-427c-9ea8-932389f5e43a done in 219 ms",
+      "2026-09-25 22:10:21,761 INFO wildebeest.worker: task de7f1162-349a-4291-8b83-6c24894416be done in 225 ms",
+      "2026-09-25 22:10:21,989 INFO wildebeest.worker: task 888d2dba-6e71-490c-bce6-0a6acee01daa done in 221 ms",
+      "2026-09-25 22:10:22,217 INFO wildebeest.worker: task 583c1d27-5fd5-4e56-ad03-ed7aa13632cd done in 220 ms",
+      "2026-09-25 22:10:22,444 INFO wildebeest.worker: task 4a398cda-c4c8-4e0f-8f8e-3d545c318396 done in 220 ms",
+      "2026-09-25 22:10:22,679 INFO wildebeest.worker: task 197dc02d-8330-4faa-9f37-81352d152d6a done in 223 ms",
+      "2026-09-25 22:10:22,922 INFO wildebeest.worker: task 0d4f3b15-0e92-4b6d-ac7e-dcb83704f37f done in 226 ms",
+      "2026-09-25 22:10:23,166 INFO wildebeest.worker: task ca21a451-2954-4e37-85d7-a7abd73305b6 done in 230 ms",
+      "2026-09-25 22:10:23,409 INFO wildebeest.worker: task 496d8a36-f353-4ee9-93d7-ea9327b84021 done in 231 ms"
+    ],
+    "b2e270f94186": [
+      "2026-09-25 22:10:20,046 INFO wildebeest.worker: task 0006c6ba-2127-485e-a420-9c2a01201530 done in 228 ms",
+      "2026-09-25 22:10:20,284 INFO wildebeest.worker: task d1d6d2ba-0ffd-4ce0-be07-bd5fef8651ce done in 228 ms",
+      "2026-09-25 22:10:20,523 INFO wildebeest.worker: task b3e11d96-7fa6-4de4-bbbd-14f02ef85968 done in 229 ms",
+      "2026-09-25 22:10:20,771 INFO wildebeest.worker: task 178bd9a9-89c5-4cd6-b4a6-21a41f8e3939 done in 227 ms",
+      "2026-09-25 22:10:21,035 INFO wildebeest.worker: task d66224ae-452d-4595-bcb5-1a6c736c57d1 done in 245 ms",
+      "2026-09-25 22:10:21,282 INFO wildebeest.worker: task da7c6959-4ca9-4a0f-9cc7-e6db79791b71 done in 235 ms",
+      "2026-09-25 22:10:21,515 INFO wildebeest.worker: task 81f80976-d840-403e-afe9-e4d0affcdf01 done in 223 ms",
+      "2026-09-25 22:10:21,754 INFO wildebeest.worker: task 1e91aed0-48df-49f2-87b7-877fe91982fc done in 226 ms",
+      "2026-09-25 22:10:21,986 INFO wildebeest.worker: task ee88d39d-9a76-4d33-a449-e2e678e4268d done in 222 ms",
+      "2026-09-25 22:10:22,215 INFO wildebeest.worker: task 952686ff-804b-4c83-9199-ba21dfdc74ea done in 223 ms",
+      "2026-09-25 22:10:22,443 INFO wildebeest.worker: task b15fe9cf-43f2-4ebc-bec8-aec761e893e6 done in 220 ms",
+      "2026-09-25 22:10:22,681 INFO wildebeest.worker: task a63a676a-6352-4ada-9019-f987daa2cb38 done in 223 ms",
+      "2026-09-25 22:10:22,924 INFO wildebeest.worker: task 71f0af25-b7f8-463e-b58e-4fa85ef31985 done in 228 ms",
+      "2026-09-25 22:10:23,167 INFO wildebeest.worker: task 191c71c2-f149-41ce-89a7-4176a42b6214 done in 232 ms",
+      "2026-09-25 22:10:23,408 INFO wildebeest.worker: task bd288f29-b13e-495c-bdd6-72a25be27d88 done in 229 ms"
+    ],
+    "98f16f6fb199": [
+      "2026-09-25 22:10:15,013 INFO wildebeest.worker: task 12072d4a-0b25-40b7-a176-ecb30f979e2a done in 239 ms",
+      "2026-09-25 22:10:15,253 INFO wildebeest.worker: task d2710d7e-d070-4dbd-a936-385e3ff5ae5f done in 231 ms",
+      "2026-09-25 22:10:15,818 INFO wildebeest.worker: task 460e6367-5b0a-48a6-aeae-68f9ee7a4927 done in 227 ms",
+      "2026-09-25 22:10:17,080 INFO wildebeest.worker: task babb4c87-c30e-4e6b-8de5-8b87c8870265 done in 255 ms",
+      "2026-09-25 22:10:17,474 INFO wildebeest.worker: task 1e121f7a-9863-4cc6-8839-e93bf1018644 done in 230 ms",
+      "2026-09-25 22:10:17,883 INFO wildebeest.worker: task d9964935-51ad-4267-b776-34132fb60fb6 done in 239 ms",
+      "2026-09-25 22:10:18,492 INFO wildebeest.worker: task 4e2e3711-d37a-4369-99a3-01582b17b64f done in 234 ms",
+      "2026-09-25 22:10:18,843 INFO wildebeest.worker: task 96157215-c925-434f-bef9-39d64f94e515 done in 294 ms",
+      "2026-09-25 22:10:19,591 INFO wildebeest.worker: task 296cabdc-1920-44be-8d49-933af346c314 done in 278 ms",
+      "2026-09-25 22:10:19,961 INFO wildebeest.worker: task 354ca2a1-a67b-48ef-8d70-0a84b79aab05 done in 241 ms",
+      "2026-09-25 22:10:20,584 INFO wildebeest.worker: task adad46fd-1d0f-4373-8813-edaeb85a7d50 done in 235 ms",
+      "2026-09-25 22:10:21,214 INFO wildebeest.worker: task 9e98ce16-bbc1-4aad-a762-4259c072d420 done in 244 ms",
+      "2026-09-25 22:10:22,002 INFO wildebeest.worker: task 4583fc1d-7f04-4956-b161-72668cf77374 done in 226 ms",
+      "2026-09-25 22:10:22,837 INFO wildebeest.worker: task ba3be127-08bd-4003-8ab0-06d1c625839b done in 241 ms",
+      "2026-09-25 22:10:23,234 INFO wildebeest.worker: task c3d652db-f9de-424b-ac45-5ad78a768daf done in 229 ms"
+    ],
+    "d3ec79630e21": [
+      "2026-09-25 22:10:16,650 INFO wildebeest.worker: task f26eee5e-7064-4f6e-bf6a-17c481e3bae2 done in 235 ms",
+      "2026-09-25 22:10:17,259 INFO wildebeest.worker: task 9c51596a-7bf5-4b40-9c3c-b18ac7f1b576 done in 232 ms",
+      "2026-09-25 22:10:17,501 INFO wildebeest.worker: task 74a635fa-df3b-497d-8a60-e8d61fe16ea1 done in 235 ms",
+      "2026-09-25 22:10:18,288 INFO wildebeest.worker: task d9d82950-475e-47f6-a2f4-67fbc81750f1 done in 232 ms",
+      "2026-09-25 22:10:18,833 INFO wildebeest.worker: task 5c52ea30-b082-4e90-8331-cf821a14fcc1 done in 323 ms",
+      "2026-09-25 22:10:19,394 INFO wildebeest.worker: task 6f70e4fd-8ae1-40df-a9dc-e36532ea2b97 done in 257 ms",
+      "2026-09-25 22:10:19,683 INFO wildebeest.worker: task 1ebb43df-95b4-4403-9c77-c87a2abb1b20 done in 274 ms",
+      "2026-09-25 22:10:19,960 INFO wildebeest.worker: task ac55a47f-9d4e-465a-80bb-0c2722bdac1f done in 240 ms",
+      "2026-09-25 22:10:20,368 INFO wildebeest.worker: task 459dc5bb-6509-40e4-bad4-1d0264e6adf4 done in 236 ms",
+      "2026-09-25 22:10:20,822 INFO wildebeest.worker: task 97358901-d42c-42dc-86f6-f9fd366b38a3 done in 268 ms",
+      "2026-09-25 22:10:21,213 INFO wildebeest.worker: task 78e884c4-f216-47de-829b-420752874997 done in 240 ms",
+      "2026-09-25 22:10:21,592 INFO wildebeest.worker: task 35887a2c-ef67-473e-9a4c-e7101516938f done in 224 ms",
+      "2026-09-25 22:10:22,406 INFO wildebeest.worker: task 4b34c015-6fc4-412d-a757-7a8494a2ff4f done in 225 ms",
+      "2026-09-25 22:10:23,031 INFO wildebeest.worker: task a0fd14d0-1d23-4443-8b26-cf1f8ef1e21a done in 233 ms",
+      "2026-09-25 22:10:23,444 INFO wildebeest.worker: task 2ea66408-7e38-465a-bdb1-c4693c060410 done in 234 ms"
+    ]
+  }
+}

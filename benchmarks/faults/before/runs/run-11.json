@@ -1,0 +1,59 @@
+{
+  "run": 11,
+  "jobId": "519de73f-e600-49ed-9b1c-9a630531e13e",
+  "images": 1200,
+  "faults": [
+    {
+      "type": "coordinator",
+      "start": 1790375750.9135091,
+      "end": 1790375753.442688,
+      "duration_s": 2.5
+    },
+    {
+      "type": "kill",
+      "start": 1790375758.254288,
+      "target": "detect-b5a3b8dee10f",
+      "end": 1790375760.5233312,
+      "duration_s": 2.3
+    },
+    {
+      "type": "minio",
+      "start": 1790375765.2246451,
+      "end": 1790375795.730282,
+      "duration_s": 30.5
+    },
+    {
+      "type": "pause",
+      "start": 1790375801.5373352,
+      "target": "detect-ed5c9eb0ae44",
+      "end": 1790375821.684166,
+      "duration_s": 20.1
+    },
+    {
+      "type": "latency",
+      "start": 1790375825.885851,
+      "target": "coordinator",
+      "end": 1790375835.9443,
+      "duration_s": 10.1
+    }
+  ],
+  "faultsInjected": 5,
+  "jobStatus": "done",
+  "finishAfterFaultsS": 48.7,
+  "wallS": 149.5,
+  "stats": {
+    "tasks": 1524,
+    "images": 1200,
+    "failedImages": 10,
+    "staleRejected": 1,
+    "reassigned": 2,
+    "leaseExpired": 0,
+    "claims": 1551,
+    "succeeded": 1514,
+    "reexecutions": 27
+  },
+  "unverifiableCompletions": 0,
+  "liveSamples": 135,
+  "violations": [],
+  "workerLogs": null
+}

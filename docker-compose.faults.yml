@@ -1,0 +1,29 @@
+# Fault-injection overlay for tests/invariants/faults.py (not used by `make up`).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.faults.yml ...
+#
+# Adds toxiproxy and routes every worker's traffic to the coordinator and to Redis through it, so
+# the fault runner can add latency or reset connections between workers and the control plane
+# without touching the coordinator. The runner creates the two proxies through toxiproxy's API
+# (host port TOXIPROXY_PORT, default 38474) before it starts any worker:
+#   coordinator  toxiproxy:8666 -> coordinator:3000
+#   redis        toxiproxy:8679 -> redis:6379
+# MinIO, Redis and coordinator restarts, SIGKILL and docker pause are done with the Docker CLI.
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports: ["${TOXIPROXY_PORT:-38474}:8474"]
+
+  detector:
+    environment:
+      COORDINATOR_URL: http://toxiproxy:8666
+      REDIS_URL: redis://toxiproxy:8679
+    depends_on:
+      toxiproxy: { condition: service_started }
+
+  classifier:
+    environment:
+      COORDINATOR_URL: http://toxiproxy:8666
+      REDIS_URL: redis://toxiproxy:8679
+    depends_on:
+      toxiproxy: { condition: service_started }
