@@ -15,6 +15,7 @@ import { hub, recordEvents, type EventInput, type EventRow } from "./events.js";
 import { getRedis, keys } from "./redis.js";
 import { telemetry } from "./telemetry.js";
 import { finalizeImage, maybeFinishJob, type Detection } from "./results.js";
+import { offerIgnored, serviceTimes } from "./speculation.js";
 
 // Task state machine (PRD 6.1):
 //
@@ -43,6 +44,12 @@ import { finalizeImage, maybeFinishJob, type Detection } from "./results.js";
 // + lease details), a completion is one statement (wb_complete in migration 006: fenced update,
 // result, finalisation, events, job check), and both can be batched: complete-batch completes
 // many tasks in one statement, and `next: k` claims the next k in the same request.
+//
+// Speculation (P3, docs/decisions/p3-speculation.md, migration 007): a LEASED task may also have
+// one speculative copy (task_attempts), valid while the lease it shadows is still the task's lease.
+// The first result to commit wins; the other attempt's report gets `already_done` (409
+// ALREADY_DONE), not STALE_LEASE. If the lease is lost while the copy is healthy, the copy is
+// promoted to be the lease instead of the task being requeued.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (s: unknown): s is string => typeof s === "string" && UUID_RE.test(s);
@@ -57,6 +64,8 @@ export interface Lease {
   sha256: string;
   countryCode: string;
   detections: Detection[] | null;
+  /** A speculative copy of a task another worker holds (additive; workers treat it like any lease). */
+  speculative?: boolean;
 }
 
 /** Side effects to run once a transaction has committed. */
@@ -101,7 +110,7 @@ function leaseSql(pick: string) {
     with picked as (${pick}),
     leased as (
       update tasks t
-         set state = 'LEASED', lease_epoch = t.lease_epoch + 1, worker_id = $1,
+         set state = 'LEASED', lease_epoch = greatest(t.lease_epoch, coalesce(t.spec_epoch, 0)) + 1, worker_id = $1,
              lease_expires_at = now() + ($2::int * interval '1 millisecond'),
              started_at = now(), queued = false,
              pushed_at = case when $5::boolean then now() else t.pushed_at end,
@@ -187,15 +196,85 @@ export async function claimConfirm(workerId: string, taskIds: string[]): Promise
   const ids = [...new Set(taskIds.filter(isUuid))];
   if (ids.length === 0) return [];
   const leases = await lease(workerId, PICK_IDS, false, [ids]);
+  // IDs that weren't PENDING may be speculative copies offered to this worker (spec:{workerId}).
+  const leasedIds = new Set(leases.map((l) => l.taskId));
+  const copies =
+    leases.length < ids.length ? await leaseCopies(workerId, ids.filter((id) => !leasedIds.has(id))) : [];
+  for (const c of copies) leasedIds.add(c.taskId);
 
   // The IDs are now either leased (tracked in Postgres) or not ours to run; either way they
   // leave the processing list. Any ID we refused that is still waiting to run goes back.
   await lremProcessing(workerId, ids);
-  const leasedIds = new Set(leases.map((l) => l.taskId));
   const refused = ids.filter((id) => !leasedIds.has(id));
   if (refused.length > 0) await requeueWaiting(refused);
   afterClaim(workerId, leases);
-  return orderLike(ids, leases);
+  return orderLike(ids, [...leases, ...copies]);
+}
+
+/**
+ * Leases the speculative copies offered to this worker (all of them, or only `taskIds`):
+ * offered → running, with the copy's own epoch and lease, only while the lease it shadows is
+ * still the task's lease, never on the worker holding that lease, and only for an ALIVE worker of
+ * the task's stage. One statement, which also writes the `speculated` event.
+ */
+export async function leaseCopies(workerId: string, taskIds: string[] | null): Promise<Lease[]> {
+  if (taskIds !== null && taskIds.length === 0) return [];
+  const { rows } = await query(
+    `with ok as (
+       select t.id, t.stage, t.image_id, t.worker_id as original_worker, t.lease_epoch as original_epoch,
+              a.epoch, a.detail, (extract(epoch from (now() - t.started_at)) * 1000)::int as age_ms
+         from task_attempts a join tasks t on t.id = a.task_id
+        where a.worker_id = $1 and a.state = 'offered' and ($2::uuid[] is null or a.task_id = any($2::uuid[]))
+          and t.state = 'LEASED' and t.lease_epoch = a.shadow_epoch and t.worker_id <> $1
+          and exists (select 1 from workers w where w.id = $1 and w.status = 'ALIVE' and w.stage = t.stage)
+        for update of t skip locked
+     ),
+     started as (
+       update task_attempts a set state = 'running', started_at = now(),
+                                  lease_expires_at = now() + ($3::int * interval '1 millisecond')
+         from ok where a.task_id = ok.id and a.epoch = ok.epoch and a.state = 'offered'
+       returning a.task_id
+     ),
+     logged as (
+       insert into task_events (task_id, worker_id, type, detail)
+       select ok.id, $1, 'speculated',
+              coalesce(ok.detail, '{}'::jsonb) || jsonb_build_object(
+                'stage', ok.stage, 'speculativeWorker', $1, 'epoch', ok.epoch,
+                'originalWorker', ok.original_worker, 'originalEpoch', ok.original_epoch, 'ageMs', ok.age_ms)
+         from ok join started s on s.task_id = ok.id
+       returning id, at, type, task_id, worker_id, detail
+     )
+     select ok.id, ok.epoch, ok.stage, i.sha256, i.object_key, coalesce(j.country_code, $4) as country_code,
+            d.detections, (select coalesce(jsonb_agg(to_jsonb(l)), '[]'::jsonb) from logged l) as events
+       from ok
+       join started s on s.task_id = ok.id
+       join images i on i.id = ok.image_id
+       join jobs j on j.id = i.job_id
+       left join detection_results d on ok.stage = 'classify' and d.sha256 = i.sha256 and d.model_version = $5`,
+    [workerId, taskIds, config.leaseMs, config.defaultCountry, config.detectorModelVersion],
+  );
+  if (rows.length === 0) return [];
+  hub.publishEvents(
+    (rows[0].events as any[]).map((e) => ({
+      id: Number(e.id),
+      at: new Date(e.at).toISOString(),
+      type: e.type,
+      taskId: e.task_id,
+      workerId: e.worker_id,
+      detail: e.detail,
+    })),
+  );
+  hub.workersChanged();
+  return rows.map((r) => ({
+    taskId: r.id,
+    leaseEpoch: r.epoch,
+    stage: r.stage,
+    imageKey: r.object_key,
+    sha256: r.sha256,
+    countryCode: r.country_code,
+    detections: r.stage === "classify" ? (r.detections ?? []) : null,
+    speculative: true,
+  }));
 }
 
 const orderLike = (ids: string[], leases: Lease[]) => {
@@ -273,7 +352,9 @@ export async function claimTasks(
   const k = Math.max(1, Math.min(Math.floor(max) || 1, config.maxClaimBatch));
   const deadline = Date.now() + Math.max(0, Math.min(Number(waitMs) || 0, config.claimWaitMaxMs));
   for (;;) {
-    const leases = await leaseFromPostgres(workerId, stage, k);
+    let leases = await leaseFromPostgres(workerId, stage, k);
+    // Nothing to hand out: exactly when a speculative copy may have been offered to this worker.
+    if (leases.length === 0) leases = await leaseCopies(workerId, null);
     const left = deadline - Date.now();
     if (leases.length > 0 || left <= 0 || gone()) return leases;
     await waitForWork(stage, Math.min(250, left));
@@ -284,8 +365,16 @@ export async function claimTasks(
 // complete
 // ---------------------------------------------------------------------------------------------
 
-export type Outcome = { status: "ok"; leases?: Lease[] } | { status: "stale" } | { status: "not_found" };
-export type ItemStatus = "ok" | "stale" | "invalid" | "not_found";
+/**
+ * `already_done`: the report's attempt was valid but the task's other attempt (speculative copy
+ * or original) committed its result first. Not a fencing event: no `stale_rejected`, not counted.
+ */
+export type Outcome =
+  | { status: "ok"; leases?: Lease[] }
+  | { status: "stale" }
+  | { status: "already_done" }
+  | { status: "not_found" };
+export type ItemStatus = "ok" | "stale" | "already_done" | "invalid" | "not_found";
 
 function num(v: unknown, what: string): number {
   const n = Number(v);
@@ -443,7 +532,12 @@ export interface BatchResult {
  * status. After the commit: push new classify tasks, publish events and telemetry, and, when
  * `next` > 0, claim the worker's next tasks (complete-and-claim-next).
  */
-export async function completeTasks(workerId: string, items: CompleteItem[], next = 0): Promise<BatchResult> {
+export async function completeTasks(
+  workerId: string,
+  items: CompleteItem[],
+  next = 0,
+  opts: { single?: boolean } = {},
+): Promise<BatchResult> {
   const startedAt = performance.now();
   const results = new Map<string, { status: ItemStatus; error?: string }>();
   const valid: NormalisedItem[] = [];
@@ -491,7 +585,8 @@ export async function completeTasks(workerId: string, items: CompleteItem[], nex
         at: new Date(r.event_at!).toISOString(),
         type: r.event_type!,
         taskId: r.task_id,
-        workerId: r.event_type === "stale_rejected" ? workerId : null,
+        // stale_rejected: the sender; speculation_won/wasted: the attempt whose result won.
+        workerId: r.event_type === "stale_rejected" ? workerId : (r.event_detail?.winner ?? null),
         detail: r.event_detail,
       });
     }
@@ -508,7 +603,10 @@ export async function completeTasks(workerId: string, items: CompleteItem[], nex
       stage = r.stage;
       if (r.finalised) finalised++;
       if (r.classify_task_id) newClassify.push(r.classify_task_id);
-      telemetry.recordCompletion(timingSample(r.stage!, r, timingsById.get(taskId) ?? null, completeMs, end), taskId);
+      const sample = timingSample(r.stage!, r, timingsById.get(taskId) ?? null, completeMs, end);
+      telemetry.recordCompletion(sample, taskId);
+      // Per-worker service times drive straggler detection and probation (speculation.ts).
+      serviceTimes.record(workerId, r.stage!, sample.serviceMs, end);
     }
   }
   telemetry.recordFinalized(finalised);
@@ -521,7 +619,9 @@ export async function completeTasks(workerId: string, items: CompleteItem[], nex
   hub.workersChanged();
 
   let leases: Lease[] = [];
-  if (next > 0) {
+  // A single complete that wasn't accepted answers 409, which carries no leases: claiming for it
+  // would strand them (LEASED to a worker that never hears of them) until their lease expired.
+  if (next > 0 && !(opts.single && rows.every((r) => r.status !== "ok"))) {
     stage ??= await workerStage(workerId);
     if (stage) leases = await claimNext(workerId, stage, next);
   }
@@ -560,7 +660,12 @@ export async function completeTask(
     if (!rowCount) return { status: "not_found" };
     throw err;
   }
-  const { results, leases } = await completeTasks(workerId, [{ taskId, leaseEpoch, result, timings: rawTimings }], next);
+  const { results, leases } = await completeTasks(
+    workerId,
+    [{ taskId, leaseEpoch, result, timings: rawTimings }],
+    next,
+    { single: true },
+  );
   const [r] = results;
   if (r.status === "invalid") throw new ValidationError(r.error ?? "invalid result");
   if (r.status === "ok") return next > 0 ? { status: "ok", leases } : { status: "ok" };
@@ -577,6 +682,48 @@ interface RetriedRow {
   state: "PENDING" | "FAILED";
   attempts: number;
   image_id: string;
+}
+
+/**
+ * A fail/release whose epoch isn't the task's lease. It may come from the task's running
+ * speculative copy: the copy is dropped and the lease carries on, nothing charged (if the error is
+ * real, the original will hit it too). A report from the attempt that lost a race gets
+ * `already_done`. Anything else is fenced off, as before.
+ */
+async function endCopyOrReject(
+  taskId: string,
+  workerId: string,
+  epoch: number,
+  action: "fail" | "release",
+  message: string,
+): Promise<Outcome> {
+  const events = await tx(async (c) => {
+    const { rows: t } = await c.query(
+      `select state, lease_epoch, spec_epoch, stage from tasks where id = $1 and spec_epoch = $2 for update`,
+      [taskId, epoch],
+    );
+    if (t.length === 0 || t[0].state !== "LEASED") return null;
+    const { rows } = await c.query(
+      `update task_attempts set state = 'dropped', finished_at = now(), end_reason = $4
+        where task_id = $1 and epoch = $2 and state = 'running' and shadow_epoch = $3
+        returning worker_id`,
+      [taskId, epoch, t[0].lease_epoch, `${action}: ${message}`.slice(0, 500)],
+    );
+    if (rows.length === 0) return null;
+    return recordEvents(c, [
+      action === "release"
+        ? { type: "released", taskId, workerId, detail: { reason: message, stage: t[0].stage, speculative: true } }
+        : { type: "failed", taskId, workerId, detail: { final: false, error: message, stage: t[0].stage, speculative: true } },
+    ]);
+  });
+  if (events !== null) {
+    publish(events, []);
+    hub.workersChanged();
+    return { status: "ok" };
+  }
+  const { rows } = await query(`select wb_late_outcome($1, $2) as outcome`, [taskId, epoch]);
+  if (rows[0].outcome === "already_done") return { status: "already_done" };
+  return rejectStale(taskId, workerId, epoch, action);
 }
 
 /** Records a rejected (fenced-off) fail/release and tells the caller whether the task exists. */
@@ -687,7 +834,7 @@ export async function failTask(
     return { events: await commitEffects(c, fx), retryInMs: t.state === "PENDING" ? (t.retry_in_ms ?? 0) : null };
   });
 
-  if (outcome === null) return rejectStale(taskId, workerId, epoch, "fail");
+  if (outcome === null) return endCopyOrReject(taskId, workerId, epoch, "fail", message);
   publish(outcome.events, fx.jobs);
   hub.workersChanged();
   // Re-dispatch when the backoff ends (push mode), not on whichever sweep comes after it.
@@ -720,7 +867,7 @@ export async function releaseTask(taskId: string, workerId: string, leaseEpoch: 
     return recordEvents(c, [{ type: "released", taskId, workerId, detail: { reason: why, stage: rows[0].stage } }]);
   });
 
-  if (rows === null) return rejectStale(taskId, workerId, epoch, "release");
+  if (rows === null) return endCopyOrReject(taskId, workerId, epoch, "release", why);
   publish(rows, []);
   hub.workersChanged();
   await pushNow([taskId]); // no backoff: it should run on a healthy worker at once
@@ -754,7 +901,17 @@ export async function requeueLostLeases(
   opts: { workerIds?: string[]; graceMs?: number } = {},
 ): Promise<{ requeued: number; failed: number; tasks: Requeued[] }> {
   const fx: Effects = { events: [], jobs: new Set() };
+  const graceMs = Math.max(0, Math.round(opts.graceMs ?? 0));
   const result = await tx(async (c) => {
+    // A lost lease with a healthy speculative copy running: the copy becomes the lease, nothing
+    // is requeued (and those tasks no longer match the requeue below).
+    const promoted = await promoteCopies(c, { graceMs, workerIds: opts.workerIds ?? null });
+    const perWorker = new Map<string, number>();
+    for (const p of promoted) {
+      fx.events.push(promotionEvent(p));
+      if (p.worker_gone && p.old_worker) perWorker.set(p.old_worker, (perWorker.get(p.old_worker) ?? 0) + 1);
+    }
+
     const { rows } = await c.query<
       RetriedRow & { old_worker: string | null; worker_gone: boolean; induced: boolean }
     >(
@@ -787,11 +944,12 @@ export async function requeueLostLeases(
          from decided d
         where t.id = d.id and t.state = 'LEASED'
         returning t.id, t.stage, t.state, t.attempts, t.image_id, d.old_worker, d.worker_gone, d.induced`,
-      [config.maxAttempts, Math.max(0, Math.round(opts.graceMs ?? 0)), opts.workerIds ?? null],
+      [config.maxAttempts, graceMs, opts.workerIds ?? null],
     );
-    if (rows.length === 0) return { requeued: 0, failed: 0, tasks: [] as Requeued[], events: [] as EventRow[] };
+    if (rows.length === 0 && promoted.length === 0) {
+      return { requeued: 0, failed: 0, tasks: [] as Requeued[], events: [] as EventRow[] };
+    }
 
-    const perWorker = new Map<string, number>();
     for (const t of rows) {
       if (t.state === "FAILED") {
         fx.events.push({
@@ -825,8 +983,118 @@ export async function requeueLostLeases(
     return { requeued: tasks.length, failed: failed.length, tasks, events: await commitEffects(c, fx) };
   });
   publish(result.events, fx.jobs);
-  if (result.requeued + result.failed > 0) hub.workersChanged();
+  const dropped = await dropDeadCopies({ graceMs, workerIds: opts.workerIds ?? null });
+  if (result.requeued + result.failed + result.events.length + dropped > 0) hub.workersChanged();
   return { requeued: result.requeued, failed: result.failed, tasks: result.tasks };
+}
+
+interface PromotedRow {
+  id: string;
+  stage: string;
+  old_worker: string | null;
+  old_epoch: number;
+  new_worker: string;
+  epoch: number;
+  worker_gone: boolean;
+}
+
+/**
+ * Speculated tasks whose lease is lost (expired, its worker not ALIVE, or `released` by it) while
+ * their copy is healthy (running, its worker ALIVE, its own lease fresh): the copy becomes the
+ * lease. tasks.worker_id/lease_epoch/lease_expires_at/started_at take the copy's values, so from
+ * here on it is an ordinary lease (renewed, completed, fenced exactly like one) and the old lease's
+ * epoch is fenced off. Not charged: the task never went back to PENDING.
+ */
+async function promoteCopies(
+  c: pg.PoolClient,
+  opts: { graceMs: number; workerIds: string[] | null; released?: boolean },
+): Promise<PromotedRow[]> {
+  const { rows } = await c.query<PromotedRow>(
+    `with lost as (
+       select t.id, t.stage, t.worker_id as old_worker, t.lease_epoch as old_epoch,
+              (w.status is distinct from 'ALIVE') as worker_gone,
+              a.epoch, a.worker_id as new_worker, a.started_at as copy_started, a.lease_expires_at as copy_expires
+         from tasks t
+         join task_attempts a on a.task_id = t.id and a.state = 'running' and a.shadow_epoch = t.lease_epoch
+         join workers sw on sw.id = a.worker_id and sw.status = 'ALIVE'
+         left join workers w on w.id = t.worker_id
+        where t.state = 'LEASED' and t.spec_epoch is not null
+          and ($2::text[] is null or t.worker_id = any($2::text[]))
+          and ($3::boolean
+               or t.lease_expires_at < now() - ($1::int * interval '1 millisecond')
+               or w.status is distinct from 'ALIVE')
+          and a.lease_expires_at >= now() - ($1::int * interval '1 millisecond')
+        for update of t, a skip locked
+     ),
+     promoted as (
+       update tasks t set worker_id = l.new_worker, lease_epoch = l.epoch, lease_expires_at = l.copy_expires,
+                          started_at = l.copy_started
+         from lost l where t.id = l.id
+     ),
+     marked as (
+       update task_attempts a
+          set state = 'promoted',
+              end_reason = case when $3::boolean then 'original released its lease'
+                                when l.worker_gone then 'original worker died'
+                                else 'original lease expired' end
+         from lost l where a.task_id = l.id and a.epoch = l.epoch
+     )
+     select id, stage, old_worker, old_epoch, new_worker, epoch, worker_gone from lost`,
+    [opts.graceMs, opts.workerIds, opts.released ?? false],
+  );
+  return rows;
+}
+
+function promotionEvent(p: PromotedRow): EventInput {
+  return {
+    type: p.worker_gone ? "reassigned" : "lease_expired",
+    taskId: p.id,
+    workerId: p.old_worker,
+    detail: {
+      stage: p.stage,
+      promoted: true,
+      to: p.new_worker,
+      epoch: p.epoch,
+      previousEpoch: p.old_epoch,
+      charged: false,
+    },
+  };
+}
+
+/**
+ * Housekeeping for attempts that can no longer win: running copies whose lease expired or whose
+ * worker is not ALIVE, copies whose task moved on under them (the lease they shadow ended), and
+ * offers not taken within SPECULATE_OFFER_TTL_MS. They become 'dropped' (their reports get
+ * STALE_LEASE). Correctness doesn't depend on this sweep (validity is checked against the task
+ * row), but it frees those workers to count as idle, and it is what fences a copy whose worker was
+ * declared dead. SKIP LOCKED: a row a completion holds is dealt with next pass.
+ */
+export async function dropDeadCopies(opts: { graceMs?: number; workerIds?: string[] | null } = {}): Promise<number> {
+  const { rows } = await query<{ worker_id: string; reason: string }>(
+    `with gone as (
+       select a.task_id, a.epoch,
+              case when w.status is distinct from 'ALIVE' then 'worker not alive'
+                   when not (t.state = 'LEASED' and t.lease_epoch = a.shadow_epoch) then 'task moved on'
+                   when a.state = 'offered' then 'offer not taken'
+                   else 'lease expired' end as reason
+         from task_attempts a
+         join tasks t on t.id = a.task_id
+         left join workers w on w.id = a.worker_id
+        where a.state in ('offered', 'running')
+          and ($2::text[] is null or a.worker_id = any($2::text[]))
+          and (w.status is distinct from 'ALIVE'
+               or not (t.state = 'LEASED' and t.lease_epoch = a.shadow_epoch)
+               or (a.state = 'running' and a.lease_expires_at < now() - ($1::int * interval '1 millisecond'))
+               or (a.state = 'offered' and a.offered_at < now() - ($3::int * interval '1 millisecond')))
+        for update of a skip locked
+     )
+     update task_attempts a set state = 'dropped', finished_at = now(), end_reason = g.reason
+       from gone g where a.task_id = g.task_id and a.epoch = g.epoch
+     returning a.worker_id, g.reason`,
+    [Math.max(0, Math.round(opts.graceMs ?? 0)), opts.workerIds ?? null, config.speculateOfferTtlMs],
+  );
+  for (const r of rows) if (r.reason === "offer not taken") offerIgnored(r.worker_id);
+  return rows.length;
 }
 
 /**
@@ -837,6 +1105,16 @@ export async function requeueLostLeases(
 export async function releaseWorkerTasks(workerId: string, reason: string): Promise<number> {
   const fx: Effects = { events: [], jobs: new Set() };
   const rows = await tx(async (c) => {
+    // A lease with a running speculative copy hands over to the copy instead of being requeued.
+    const promoted = await promoteCopies(c, { graceMs: 0, workerIds: [workerId], released: true });
+    fx.events.push(
+      ...promoted.map((p) => ({
+        type: "released",
+        taskId: p.id,
+        workerId,
+        detail: { reason, stage: p.stage, promoted: true, to: p.new_worker, epoch: p.epoch },
+      })),
+    );
     const { rows } = await c.query(
       `update tasks set state = 'PENDING', releases = releases + 1, pending_at = now(),
                         queued = false, worker_id = null, lease_expires_at = null
@@ -845,11 +1123,17 @@ export async function releaseWorkerTasks(workerId: string, reason: string): Prom
       [workerId],
     );
     fx.events.push(...rows.map((r) => ({ type: "released", taskId: r.id, workerId, detail: { reason, stage: r.stage } })));
-    return commitEffects(c, fx);
+    // This worker's own copies and offers end with it (its next incarnation holds nothing).
+    await c.query(
+      `update task_attempts set state = 'dropped', finished_at = now(), end_reason = $2
+        where worker_id = $1 and state in ('offered', 'running')`,
+      [workerId, reason],
+    );
+    return { events: await commitEffects(c, fx), released: rows.map((r) => r.id as string) };
   });
-  publish(rows, []);
-  await pushNow(rows.map((r) => r.taskId!));
-  return rows.length;
+  publish(rows.events, []);
+  await pushNow(rows.released);
+  return rows.released.length;
 }
 
 /**

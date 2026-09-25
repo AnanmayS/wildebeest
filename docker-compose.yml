@@ -91,6 +91,13 @@ services:
       # Full-jitter backoff before a failed task is retried: random(0, min(max, base * 2^errors)).
       RETRY_BASE_MS: ${RETRY_BASE_MS:-500}
       RETRY_MAX_MS: ${RETRY_MAX_MS:-30000}
+      # Straggler speculation (on | off): when a stage's queue is empty and a worker is idle, a task
+      # running > max(SPECULATE_MIN_MS, SPECULATE_MULTIPLIER × stage p50) gets one copy on the fastest
+      # idle worker; the first result wins. Workers slower than PROBATION × stage p50 get no copies.
+      SPECULATION: ${SPECULATION:-on}
+      SPECULATE_MULTIPLIER: ${SPECULATE_MULTIPLIER:-3}
+      SPECULATE_MIN_MS: ${SPECULATE_MIN_MS:-1000}
+      SPECULATE_PROBATION_MULTIPLIER: ${SPECULATE_PROBATION_MULTIPLIER:-3}
     ports: ["${COORDINATOR_PORT:-3000}:3000"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

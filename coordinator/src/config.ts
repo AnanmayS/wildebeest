@@ -83,6 +83,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     systemIntervalMs: num(env, "SYSTEM_INTERVAL_MS", 500),
     invariantIntervalMs: num(env, "INVARIANT_INTERVAL_MS", 5000),
     maxSyntheticTasks: num(env, "MAX_SYNTHETIC_TASKS", 1_000_000),
+
+    // Straggler speculation (docs/decisions/p3-speculation.md). When a stage's ready queue is
+    // empty and a worker is idle, a task running longer than max(SPECULATE_MIN_MS,
+    // SPECULATE_MULTIPLIER × the stage's p50 service time) gets one speculative copy on the fastest
+    // idle worker; the first result wins. A worker whose p50 exceeds
+    // SPECULATE_PROBATION_MULTIPLIER × the stage p50 is on probation: it gets no copies.
+    speculation: oneOf(env, "SPECULATION", ["on", "off"] as const),
+    speculateMultiplier: num(env, "SPECULATE_MULTIPLIER", 3),
+    speculateMinMs: num(env, "SPECULATE_MIN_MS", 1000),
+    speculateMinSamples: num(env, "SPECULATE_MIN_SAMPLES", 5),
+    speculateProbationMultiplier: num(env, "SPECULATE_PROBATION_MULTIPLIER", 3),
+    speculateIntervalMs: num(env, "SPECULATE_INTERVAL_MS", 250),
+    /** An offer the target worker hasn't claimed by then is dropped (and may go to another worker). */
+    speculateOfferTtlMs: num(env, "SPECULATE_OFFER_TTL_MS", 3000),
   };
 }
 

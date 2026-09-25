@@ -453,3 +453,79 @@ above is unchanged.
   `queued=false`; `system.dispatcher.lastSweepRepaired` counts what it pushed. `DISPATCH_MODE=tick` restores P1.
 - `DETECT_QUEUE_TARGET` empty/0 (default) = max(`DETECT_QUEUE_MIN` (8), 2 × Σ live detect workers' `claimBatch`);
   a positive value pins it.
+
+## P3 refinements (straggler speculation, 2026-09-25)
+
+Recorded by the P3 work (docs/decisions/p3-speculation.md, migration `007_speculation.sql`). Every shape above is
+unchanged; the fields below are additive.
+
+**Attempts and fencing**
+
+- A LEASED task has its lease (the `tasks` row, exactly as before) and at most one **speculative copy** (a
+  `task_attempts` row with its own epoch). Epochs stay unique per task: a claim now takes
+  `greatest(lease_epoch, spec_epoch) + 1`. The copy is valid only while the lease it was started next to is still the
+  task's lease (`task.state = LEASED and task.lease_epoch = copy.shadow_epoch`).
+- **First commit wins.** Whichever attempt's `complete` commits first finalises the task (on a copy win the task's
+  `worker_id`/`lease_epoch`/`started_at` become the copy's). The other attempt's later `complete`, `fail` or `release`
+  is answered **409 `{ "error": "ALREADY_DONE" }`** (complete-batch item status `"already_done"`). It is not a fencing
+  event: no `stale_rejected`, not counted in `system.fencing`. Workers discard the result, as for STALE_LEASE.
+- Everything else is fenced exactly as before, 409 STALE_LEASE: an old epoch, a copy that was dropped (its worker died,
+  its lease expired, its task moved on), and a lease that was lost *before* the other attempt won, e.g. an original
+  paused past its lease or declared dead.
+- **Promotion.** When a speculated task's lease is lost (expired, worker not ALIVE, deregister/re-register) while its
+  copy is healthy (running, worker ALIVE, own lease fresh), the copy becomes the lease instead of the task being
+  requeued. No attempt is charged; the event is the usual `lease_expired` / `reassigned` / `released` with
+  `detail.promoted: true, to: <worker>, epoch`.
+- A copy's `fail`/`release` ends only the copy (nothing charged; `failed`/`released` event with
+  `detail.speculative: true`); the lease carries on.
+- A single `complete` that isn't accepted (409) no longer claims `next` leases (they were stranded until their lease
+  expired, since a 409 carries none). complete-batch still honours `next` whatever the item statuses.
+
+**Worker protocol**
+
+- Offers (hybrid): the coordinator `RPUSH`es the task ID to **`spec:{workerId}`**. The worker's claim `MULTI` first
+  does `LMOVE spec:{workerId} processing:{workerId} LEFT RIGHT`, then its k `LMOVE`s from the shared queue, and
+  claim-confirms as usual; `claim-confirm` leases a copy for an ID that is offered to that worker. Postgres mode:
+  `POST /tasks/claim` returns offered copies when there is nothing else to lease (the long-poll is woken).
+  An offer not taken within `SPECULATE_OFFER_TTL_MS` (3000) is dropped. `spec:{workerId}` is deleted with the
+  processing list (death, deregister, re-register).
+- The idle `BLMOVE` timeout is now `IDLE_WAIT_MS` (worker env, default 250 ms; was 1 s), so an offer is picked up
+  within ~250 ms.
+- Lease objects may carry `"speculative": true` (additive; the worker treats a copy like any lease).
+- Heartbeat: the copy's lease is renewed like any other (`taskIds` lists it). The 200 response gains
+  **`"cancel": [taskId]`**: held tasks that were speculated and on which the worker no longer holds a valid attempt
+  (the other attempt won, or its copy ended). The worker drops a waiting lease at once; a running one can't be
+  interrupted, so its result is discarded when the handler returns (no report); a finished-but-unreported result is
+  reported anyway (the answer decides). Only speculated tasks are ever cancelled.
+
+**Policy** (coordinator env; every `SPECULATE_INTERVAL_MS`, default 250)
+
+- `SPECULATION=on|off` (default on). Per stage, only when the stage has **no PENDING task** and an ALIVE worker of that
+  stage holds no lease and no copy/offer (and heartbeated within 2 × `HEARTBEAT_MS`).
+- Candidates: LEASED tasks older (since claim) than `max(SPECULATE_MIN_MS (1000), SPECULATE_MULTIPLIER (3) × stage
+  p50 service time)`, oldest first, never speculated before (an untaken offer doesn't count). Needs
+  `SPECULATE_MIN_SAMPLES` (5) completions of the stage as a baseline. Service time = claimed → complete handled, over
+  the stage's last 200 completions (10 min).
+- Target: the fastest idle worker by its own p50 (last 20 completions; workers without 3 samples rank last), never the
+  lease holder, not on probation, not cooling down (30 s after ignoring an offer). One copy per idle worker per pass.
+- **Probation**: a worker whose p50 > `SPECULATE_PROBATION_MULTIPLIER` (3) × its stage's p50 gets no copies (it keeps
+  its normal work).
+
+**Events** (all in the event log, with `detail`)
+
+- `speculated` (workerId = the copy's worker) `{ stage, originalWorker, originalEpoch, speculativeWorker, epoch,
+  ageMs, thresholdMs, stageP50Ms, multiplier, targetP50Ms }`, written when the copy is leased.
+- `speculation_won` (workerId = winner) `{ stage, winner, epoch, originalWorker, originalEpoch, originalAgeMs?,
+  promoted }`: the copy's result won (`promoted: true` if it won after taking over the lease).
+- `speculation_wasted` (workerId = winner) `{ stage, winner, epoch, speculativeWorker, speculativeEpoch }`: the task
+  was completed by another attempt than its launched copy.
+
+**`system` / workers (additive)**
+
+- `system.speculation` = `{ launched, won, wasted, running, enabled, probation: [ { workerId, stage, p50ServiceMs,
+  stageP50ServiceMs } ] }`. `launched`/`won`/`wasted` are counts of the three events above (durable, all time, the
+  same on every coordinator); `running` = copies running now.
+- `system.leases[]` items gain `"copy": { workerId, epoch, ageMs } | null` (the task's running copy). Copies are not
+  separate lease items (the dashboard keys leases by task).
+- Worker objects (`GET /workers`, `worker_update`) gain `"speculativeTaskIds": []`, `"probation": bool`,
+  `"p50ServiceMs": n | null`; `state` is `busy` while the worker runs a copy.

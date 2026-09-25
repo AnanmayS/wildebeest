@@ -100,7 +100,10 @@ function expectContractShape(s: any) {
   for (const st of Object.values(s.stages) as any[]) {
     expect(keysOf(st)).toEqual(["completedPerSec", "inFlight", "p50ServiceMs", "workersAlive"]);
   }
-  for (const l of s.leases) expect(keysOf(l)).toEqual(["ageMs", "attempt", "epoch", "imageUrl", "stage", "taskId", "workerId"]);
+  // `copy` is P3's additive field (the task's running speculative copy, or null).
+  for (const l of s.leases) {
+    expect(keysOf(l)).toEqual(["ageMs", "attempt", "copy", "epoch", "imageUrl", "stage", "taskId", "workerId"]);
+  }
   expect(keysOf(s.timings)).toEqual(["overheadPct", "p50", "p95", "samples", "windowSec"]);
   expect(keysOf(s.timings.p50)).toEqual([...TIMING_KEYS].sort());
   expect(keysOf(s.timings.p95)).toEqual([...TIMING_KEYS].sort());
@@ -115,7 +118,8 @@ function expectContractShape(s: any) {
   expect(s.throughput).toHaveLength(120);
   for (const b of s.throughput) expect(keysOf(b)).toEqual(["classify", "detect", "images", "t"]);
   expect(keysOf(s.cache)).toEqual(["hitRatePct", "hitsLast10m"]);
-  expect(s.speculation).toEqual({ launched: 0, won: 0, wasted: 0 });
+  // The v2 counters plus P3's additive fields.
+  expect(s.speculation).toEqual({ launched: 0, won: 0, wasted: 0, running: 0, enabled: true, probation: [] });
   expect(s.leader).toBeNull();
 }
 

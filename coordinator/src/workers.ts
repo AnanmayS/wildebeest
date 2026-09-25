@@ -3,6 +3,7 @@ import { getPool, query } from "./db.js";
 import { hub, recordEvents } from "./events.js";
 import { getRedis, keys } from "./redis.js";
 import { refreshStats } from "./dispatcher.js";
+import { probation, serviceTimes } from "./speculation.js";
 import { presign } from "./storage.js";
 import { isUuid, releaseWorkerTasks, requeueWaiting, ValidationError } from "./tasks.js";
 
@@ -27,7 +28,8 @@ async function setAlive(workerId: string) {
  */
 export async function drainProcessingList(workerId: string): Promise<string[]> {
   const key = keys.processing(workerId);
-  const res = await getRedis().multi().lrange(key, 0, -1).del(key).exec();
+  // Offers waiting in spec:{workerId} go too: they are dropped in Postgres when their TTL runs out.
+  const res = await getRedis().multi().lrange(key, 0, -1).del(key).del(keys.spec(workerId)).exec();
   const ids = (res?.[0]?.[1] as string[] | undefined) ?? [];
   if (ids.length === 0) return [];
   return requeueWaiting(ids);
@@ -98,15 +100,30 @@ export async function registerWorker(body: {
  * so its lease runs out and the reaper hands it to someone else instead of it staying LEASED forever.
  */
 export async function heartbeat(workerId: string, metrics: unknown, taskIds: unknown = []): Promise<boolean> {
+  return (await heartbeatWithCancel(workerId, metrics, taskIds)).alive;
+}
+
+/**
+ * The heartbeat plus the tasks the worker should drop (`cancel`): held tasks that were speculated
+ * and on which this worker no longer holds a valid attempt, i.e. the other attempt's result won,
+ * or the lease its copy shadowed ended. Only speculated tasks are ever cancelled; everything else
+ * behaves as before (a lost lease is discovered through STALE_LEASE on the report).
+ */
+export async function heartbeatWithCancel(
+  workerId: string,
+  metrics: unknown,
+  taskIds: unknown = [],
+): Promise<{ alive: boolean; cancel: string[] }> {
   const m = metrics && typeof metrics === "object" ? metrics : {};
   const held = Array.isArray(taskIds) ? taskIds.filter(isUuid) : [];
   // One statement. An idle worker (nothing held) never touches tasks. Renewal skips rows a
   // completion is holding right now (SKIP LOCKED): those leases are ending anyway, and waiting on
-  // them could deadlock against a batch that locks the same rows in a different order.
-  const { rows } = await query<{ alive: boolean }>(
+  // them could deadlock against a batch that locks the same rows in a different order. The same
+  // goes for the worker's speculative copies (task_attempts).
+  const { rows } = await query<{ alive: boolean; cancel: string[] | null }>(
     held.length === 0
       ? `update workers set last_heartbeat_at = now(), metrics = $2 where id = $1 and status = 'ALIVE'
-         returning true as alive`
+         returning true as alive, null::uuid[] as cancel`
       : `with w as (
            update workers set last_heartbeat_at = now(), metrics = $2 where id = $1 and status = 'ALIVE'
            returning id
@@ -117,17 +134,32 @@ export async function heartbeat(workerId: string, metrics: unknown, taskIds: unk
                           where id = any($4::uuid[]) and worker_id = $1 and state = 'LEASED'
                             and exists (select 1 from w)
                           for update skip locked)
+         ),
+         renewed_copies as (
+           update task_attempts set lease_expires_at = now() + ($3::int * interval '1 millisecond')
+            where (task_id, epoch) in (select task_id, epoch from task_attempts
+                                        where task_id = any($4::uuid[]) and worker_id = $1 and state = 'running'
+                                          and exists (select 1 from w)
+                                        for update skip locked)
          )
-         select true as alive from w`,
+         select true as alive,
+                (select array_agg(t.id) from tasks t
+                  where t.id = any($4::uuid[]) and t.spec_epoch is not null
+                    and not (t.state = 'LEASED'
+                             and (t.worker_id = $1
+                                  or exists (select 1 from task_attempts a
+                                              where a.task_id = t.id and a.worker_id = $1 and a.state = 'running'
+                                                and a.shadow_epoch = t.lease_epoch)))) as cancel
+           from w`,
     held.length === 0 ? [workerId, JSON.stringify(m)] : [workerId, JSON.stringify(m), config.leaseMs, held],
   );
   if (rows.length === 0) {
     await recordRefusedHeartbeat(workerId, held);
-    return false;
+    return { alive: false, cancel: [] };
   }
   await setAlive(workerId);
   hub.workersChanged();
-  return true;
+  return { alive: true, cancel: rows[0].cancel ?? [] };
 }
 
 /**
@@ -167,6 +199,12 @@ export interface WorkerView {
   stage: Stage;
   status: "ALIVE" | "DEAD" | "STOPPED";
   state: "idle" | "busy" | "dead";
+  /** P3 (additive): tasks this worker runs as a speculative copy (not in currentTaskIds). */
+  speculativeTaskIds: string[];
+  /** P3 (additive): recent p50 service time > probation multiplier × stage p50; gets no copies. */
+  probation: boolean;
+  /** P3 (additive): this worker's recent p50 service time (claimed → complete handled), or null. */
+  p50ServiceMs: number | null;
   containerId: string | null;
   hostname: string | null;
   runtime: "container" | "native";
@@ -188,7 +226,9 @@ export async function listWorkers(): Promise<WorkerView[]> {
   const { rows } = await query(
     `select w.*,
             coalesce(array_agg(t.id order by t.started_at) filter (where t.id is not null), '{}') as task_ids,
-            (array_agg(i.object_key order by t.started_at) filter (where t.id is not null))[1] as image_key
+            (array_agg(i.object_key order by t.started_at) filter (where t.id is not null))[1] as image_key,
+            (select coalesce(array_agg(a.task_id order by a.started_at), '{}') from task_attempts a
+              where a.worker_id = w.id and a.state = 'running') as copy_task_ids
        from workers w
        left join tasks t on t.worker_id = w.id and t.state = 'LEASED'
        left join images i on i.id = t.image_id
@@ -196,16 +236,21 @@ export async function listWorkers(): Promise<WorkerView[]> {
       group by w.id
       order by w.stage, w.registered_at, w.id`,
   );
+  const onProbation = new Map(probation().map((p) => [p.workerId, p]));
   return Promise.all(
     rows.map(async (r): Promise<WorkerView> => {
       const m = r.metrics ?? {};
       const taskIds: string[] = r.task_ids ?? [];
+      const copyIds: string[] = r.copy_task_ids ?? [];
       const alive = r.status === "ALIVE";
       return {
         id: r.id,
         stage: r.stage,
         status: r.status,
-        state: !alive ? "dead" : taskIds.length > 0 ? "busy" : "idle",
+        state: !alive ? "dead" : taskIds.length + copyIds.length > 0 ? "busy" : "idle",
+        speculativeTaskIds: alive ? copyIds : [],
+        probation: onProbation.has(r.id),
+        p50ServiceMs: serviceTimes.worker(r.id)?.p50 ?? null,
         containerId: r.container_id,
         hostname: r.hostname,
         runtime: r.runtime,

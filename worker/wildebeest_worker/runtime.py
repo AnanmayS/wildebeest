@@ -16,6 +16,15 @@ Lifecycle
      complete-batch for several) that also asks for the next leases (`next`), so a busy
      worker makes one coordinator round trip per batch, not two per task. 409 STALE_LEASE
      (or status "stale" in a batch) means our lease was taken over: discard and move on.
+     409 ALREADY_DONE (status "already_done") means a speculative copy of the task (or the
+     original, if we ran the copy) committed first: also discard, but it isn't a fencing event.
+  Speculation: the coordinator may offer this worker a copy of a straggling task by pushing its
+     ID to spec:{workerId}, which the hybrid claim moves from before the shared queue (postgres
+     mode gets it from /tasks/claim). A copy is an ordinary lease with its own epoch. A heartbeat
+     response may carry `cancel: [taskId]` (the other attempt won, or our copy ended): a waiting
+     lease is dropped at once; a running one can't be interrupted (a model call), so its result
+     is dropped when the handler returns; a finished, unreported one is reported anyway and the
+     coordinator's answer decides.
   5. SIGTERM / stop(): stop claiming, finish the in-flight task, report, deregister, exit.
      SIGKILL needs nothing here; the coordinator's death watch / reaper recovers.
 
@@ -100,6 +109,14 @@ def classify_error(e: BaseException) -> str:
     except ImportError:  # pragma: no cover
         pass
     return TASK
+
+
+def _error_code(resp) -> str:
+    """The `error` of a coordinator error response (STALE_LEASE, ALREADY_DONE, ...), or 'HTTP n'."""
+    try:
+        return str((resp.json() or {}).get("error") or f"HTTP {resp.status_code}")
+    except ValueError:
+        return f"HTTP {resp.status_code}"
 
 
 def full_jitter(attempt: int, base_s: float, cap_s: float, rng: Callable[[], float] = random.random) -> float:
@@ -259,6 +276,9 @@ class Worker:
         # (0 = auto: the current claim batch), after COMPLETE_FLUSH_MS, or when we run out of work.
         self.complete_batch = int(os.environ.get("COMPLETE_BATCH", "0"))
         self.flush_s = int(os.environ.get("COMPLETE_FLUSH_MS", "50")) / 1000
+        # Hybrid: how long one blocking BLMOVE waits on an empty queue before the claim loop checks
+        # again (and so picks up a speculative copy offered to us). Was 1 s before P3.
+        self.idle_wait_s = int(os.environ.get("IDLE_WAIT_MS", "250")) / 1000
 
         self.stopping = threading.Event()  # set by SIGTERM/SIGINT or stop()
         self.dead = threading.Event()  # set by the heartbeat thread on 410
@@ -267,6 +287,9 @@ class Worker:
         self.current: dict | None = None  # the lease being processed
         self.finished: list[Finished] = []  # done, result not yet accepted by the coordinator
         self.current_image_key: str | None = None
+        # Running tasks the coordinator told us to drop (heartbeat `cancel`): their result is discarded.
+        self.cancelled: set[str] = set()
+        self.tasks_cancelled = 0
         self.tasks_done = 0
         self.total_latency_ms = 0.0
 
@@ -279,7 +302,7 @@ class Worker:
     def held_task_ids(self) -> list[str]:
         """Every task we hold a lease on: the one running, the ones waiting, the unreported ones."""
         with self.lock:
-            ids = [self.current["taskId"]] if self.current else []
+            ids = [self.current["taskId"]] if self.current and self.current["taskId"] not in self.cancelled else []
             ids += [lease["taskId"] for lease, _ in self.backlog]
             ids += [f.item["taskId"] for f in self.finished]
         return ids
@@ -358,6 +381,7 @@ class Worker:
         with self.lock:  # a new incarnation holds nothing: the old one's leases were released
             self.backlog.clear()
             self.finished.clear()
+            self.cancelled.clear()
         self.dead.clear()
         log.info("registered as %s (%s/%s, %s claims, batch %d..%d, prefetch %d, heartbeat %.1fs)",
                  self.worker_id, self.runtime, self.device, self.claim_mode, self.batch_size, self.max_batch,
@@ -393,10 +417,31 @@ class Worker:
         elif not resp.ok:
             log.warning("heartbeat got HTTP %d", resp.status_code)
         else:
-            mode = resp.json().get("claimMode")
+            data = resp.json()
+            mode = data.get("claimMode")
             if mode in ("hybrid", "postgres") and mode != self.claim_mode:
                 log.info("coordinator switched to %s claims", mode)
                 self.claim_mode = mode  # read by the main loop on its next claim
+            if data.get("cancel"):
+                self.cancel(data["cancel"])
+
+    def cancel(self, task_ids: list[str]) -> None:
+        """Drop tasks another attempt has already finished (speculation): a waiting lease leaves
+        the backlog, the running one's result is discarded when it returns. A finished result
+        that isn't reported yet is left alone: the report is already on its way and the
+        coordinator answers it (ok, or ALREADY_DONE)."""
+        wanted = set(task_ids)
+        with self.lock:
+            kept = deque(item for item in self.backlog if item[0]["taskId"] not in wanted)
+            dropped = len(self.backlog) - len(kept)
+            self.backlog = kept
+            running = self.current["taskId"] if self.current and self.current["taskId"] in wanted else None
+            if running:
+                self.cancelled.add(running)
+            self.tasks_cancelled += dropped + (1 if running else 0)
+        if dropped or running:
+            log.info("cancelled by the coordinator (another attempt finished first): %d waiting%s",
+                     dropped, f", running {running}" if running else "")
 
     def _heartbeat_loop(self) -> None:
         while not self.stopping.is_set():
@@ -413,20 +458,25 @@ class Worker:
         """Hybrid mode: move up to k IDs from the ready queue into our processing list.
 
         One MULTI/EXEC round trip moves up to k at once (atomic, like a Lua script, but needs no
-        scripting engine); only an empty queue costs a second, blocking BLMOVE (≤ 1 s) for the first.
+        scripting engine); only an empty queue costs a second, blocking BLMOVE for the first.
+        The same transaction first takes a speculative copy offered to us (spec:{workerId}), if any:
+        offers only happen when the shared queue is empty, i.e. while we loop on the BLMOVE, so the
+        blocking wait is short (IDLE_WAIT_MS, 250 ms): an offer is picked up within that.
         """
         k = k or self.window()
         src, dst = f"queue:{self.stage}", f"processing:{self.worker_id}"
-        ids = self._move(src, dst, k)
+        ids = self._move(src, dst, k, offers=f"spec:{self.worker_id}")
         if not ids:
-            first = self.redis.blmove(src, dst, 1, "LEFT", "RIGHT")
+            first = self.redis.blmove(src, dst, self.idle_wait_s, "LEFT", "RIGHT")
             if first is None:
                 return []
             ids = [first] + (self._move(src, dst, k - 1) if k > 1 else [])
         return [i.decode() if isinstance(i, bytes) else i for i in ids]
 
-    def _move(self, src: str, dst: str, k: int) -> list:
+    def _move(self, src: str, dst: str, k: int, offers: str | None = None) -> list:
         pipe = self.redis.pipeline(transaction=True)
+        if offers:
+            pipe.lmove(offers, dst, "LEFT", "RIGHT")
         for _ in range(k):
             pipe.lmove(src, dst, "LEFT", "RIGHT")
         return [i for i in pipe.execute() if i is not None]
@@ -477,7 +527,7 @@ class Worker:
         resp = self._report(f"/tasks/{task_id}/release",
                             {"workerId": self.worker_id, "leaseEpoch": lease["leaseEpoch"], "reason": reason[:500]})
         if resp.status_code == 409:
-            log.info("release for %s rejected: STALE_LEASE", task_id)
+            log.info("release for %s rejected: %s", task_id, _error_code(resp))
 
     def fail(self, lease: dict, error: str, non_retryable: bool = False) -> None:
         task_id = lease["taskId"]
@@ -486,7 +536,7 @@ class Worker:
             body["nonRetryable"] = True
         resp = self._report(f"/tasks/{task_id}/fail", body)
         if resp.status_code == 409:
-            log.info("fail for %s rejected: STALE_LEASE", task_id)
+            log.info("fail for %s rejected: %s", task_id, _error_code(resp))
 
     def _flush_due(self) -> bool:
         with self.lock:
@@ -531,7 +581,7 @@ class Worker:
 
         if len(batch) == 1:
             if resp.status_code == 409:
-                statuses = ["stale"]
+                statuses = ["already_done" if _error_code(resp) == "ALREADY_DONE" else "stale"]
             else:
                 resp.raise_for_status()
                 statuses = ["ok"]
@@ -546,6 +596,10 @@ class Worker:
                     self.tasks_done += 1
                     self.total_latency_ms += f.latency_ms
                 log.debug("task %s done in %.0f ms", f.item["taskId"], f.latency_ms)
+            elif status == "already_done":
+                # Speculation: the task's other attempt committed first. Not an error, not fenced.
+                log.info("result for %s discarded: another attempt finished first (epoch %s)",
+                         f.item["taskId"], f.item["leaseEpoch"])
             else:
                 log.warning("result for %s discarded: %s (epoch %s)", f.item["taskId"],
                             "STALE_LEASE" if status == "stale" else status, f.item["leaseEpoch"])
@@ -567,6 +621,9 @@ class Worker:
         try:
             result = self.handler(lease)
         except Exception as e:
+            if self._take_cancelled(lease):
+                log.info("task %s failed after it was cancelled; not reporting (%s)", lease["taskId"], e)
+                return
             self._report_error(lease, e)
             return
         finally:
@@ -574,12 +631,23 @@ class Worker:
                 self.current_image_key = None
 
         latency_ms = (time.perf_counter() - started) * 1000
+        if self._take_cancelled(lease):
+            # Another attempt already won (speculation): the lease is gone, don't report.
+            log.info("task %s finished after it was cancelled; result dropped", lease["taskId"])
+            return
         self.sizer.observe_service(latency_ms)
         result["latencyMs"] = round(latency_ms)
         item = {"taskId": lease["taskId"], "leaseEpoch": lease["leaseEpoch"], "result": result,
                 "timings": self._timings(claim_ms, latency_ms)}
         with self.lock:
             self.finished.append(Finished(item, latency_ms, time.monotonic()))
+
+    def _take_cancelled(self, lease: dict) -> bool:
+        with self.lock:
+            if lease["taskId"] in self.cancelled:
+                self.cancelled.discard(lease["taskId"])
+                return True
+            return False
 
     def _timings(self, claim_ms: float, handler_ms: float) -> dict:
         """claim RTT share, then the handler split into storage reads, storage writes and the rest.
@@ -650,6 +718,7 @@ class Worker:
                     self.execute(lease, claim_ms)
                 with self.lock:
                     self.current = None
+                    self.cancelled.discard(lease["taskId"])  # a cancel that raced the task's end
                 if self._flush_due():
                     self.flush()
             self.flush()  # stopping, dead, or out of work: report what we have (a zombie once)

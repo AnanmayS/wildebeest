@@ -67,6 +67,8 @@ const LOG_TYPES = new Set([
   "released",
   "redriven",
   "speculated",
+  "speculation_won",
+  "speculation_wasted",
 ]);
 
 const short = (id: string | null | undefined) => (id ? id.slice(0, 8) : "?");
@@ -89,14 +91,29 @@ export function describeEvent(e: EventRow): string {
     case "redriven":
       return `task ${short(e.taskId)}… redriven from the DLQ`;
     case "released":
+      if (d.speculative) return `speculative copy of task ${short(e.taskId)}… released by ${e.workerId}; the original carries on`;
+      if (d.promoted) return `${e.workerId} let go of task ${short(e.taskId)}… (${d.reason}); its speculative copy on ${d.to} took over`;
       return `task ${short(e.taskId)}… released by ${e.workerId} (${d.reason ?? "released"}); no attempt used`;
+    case "speculated":
+      return (
+        `task ${short(e.taskId)}… running ${Math.round((d.ageMs ?? 0) / 100) / 10}s on ${d.originalWorker ?? "?"} ` +
+        `(threshold ${Math.round((d.thresholdMs ?? 0) / 100) / 10}s); speculative copy on ${e.workerId}`
+      );
+    case "speculation_won":
+      return d.promoted
+        ? `speculative copy on ${e.workerId} finished task ${short(e.taskId)}… after ${d.originalWorker ?? "the original"} lost its lease`
+        : `speculative copy on ${e.workerId} won task ${short(e.taskId)}…; ${d.originalWorker ?? "the original"} told to cancel`;
+    case "speculation_wasted":
+      return `${e.workerId} finished task ${short(e.taskId)}… first; speculative copy on ${d.speculativeWorker ?? "?"} wasted`;
     case "heartbeat_refused":
       return `${e.workerId} woke up after being declared dead; heartbeat refused (410), it re-registers`;
     case "reassigned":
+      if (d.promoted) return `${e.workerId} died; its speculative copy on ${d.to} took over task ${short(e.taskId)}… (epoch ${d.epoch})`;
       return d.charged === false
         ? `${e.workerId} died; task ${short(e.taskId)}… reassigned (our own fault injection, no attempt used)`
         : `${e.workerId} died; task ${short(e.taskId)}… reassigned (attempt ${d.attempts ?? "?"})`;
     case "lease_expired":
+      if (d.promoted) return `lease on task ${short(e.taskId)}… held by ${e.workerId} expired; its speculative copy on ${d.to} took over (epoch ${d.epoch})`;
       return `lease on task ${short(e.taskId)}… held by ${e.workerId} expired; requeued (attempt ${d.attempts ?? "?"})`;
     case "stale_rejected":
       return `stale result from ${e.workerId} for task ${short(e.taskId)}… rejected (epoch ${d.leaseEpoch} ≠ ${d.currentEpoch})`;
@@ -107,6 +124,7 @@ export function describeEvent(e: EventRow): string {
     case "unthrottled":
       return `backpressure off: classify queue ${d.classifyQueue} < ${d.lowWater}`;
     case "failed":
+      if (d.speculative) return `speculative copy of task ${short(e.taskId)}… failed on ${e.workerId}; the original carries on`;
       return d.final
         ? `task ${short(e.taskId)}… failed permanently after ${d.attempts} attempts${d.error ? `: ${d.error}` : ""}`
         : `task ${short(e.taskId)}… failed on ${e.workerId} (attempt ${d.attempts}); retrying${d.error ? `: ${d.error}` : ""}`;

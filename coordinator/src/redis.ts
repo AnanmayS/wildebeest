@@ -6,6 +6,8 @@ import { config } from "./config.js";
 export const keys = {
   queue: (stage: string) => `queue:${stage}`,
   processing: (workerId: string) => `processing:${workerId}`,
+  // Speculative copies offered to one worker (it LMOVEs from here before the shared queue).
+  spec: (workerId: string) => `spec:${workerId}`,
   alive: (workerId: string) => `worker:${workerId}:alive`,
   throttled: "wildebeest:throttled",
   // Set whenever the queues are (re)built from Postgres. If it disappears, Redis lost its data.

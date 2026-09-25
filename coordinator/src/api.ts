@@ -30,13 +30,15 @@ import {
   ValidationError,
   type Outcome,
 } from "./tasks.js";
-import { deregisterWorker, heartbeat, listWorkers, registerWorker } from "./workers.js";
+import { deregisterWorker, heartbeatWithCancel, listWorkers, registerWorker } from "./workers.js";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024, files: 5000 } });
 
 function sendOutcome(res: Response, outcome: Outcome) {
   if (outcome.status === "ok") return res.json(outcome.leases ? { ok: true, leases: outcome.leases } : { ok: true });
   if (outcome.status === "stale") return res.status(409).json({ error: "STALE_LEASE" });
+  // P3: the task's other attempt (speculative copy or original) won the race. Drop the result.
+  if (outcome.status === "already_done") return res.status(409).json({ error: "ALREADY_DONE" });
   return res.status(404).json({ error: "NOT_FOUND" });
 }
 
@@ -182,10 +184,11 @@ export function createApp() {
   });
 
   app.post("/workers/:id/heartbeat", async (req, res) => {
-    const ok = await heartbeat(req.params.id, req.body?.metrics, req.body?.taskIds);
-    if (!ok) return res.status(410).json({ error: "WORKER_DEAD" });
+    const hb = await heartbeatWithCancel(req.params.id, req.body?.metrics, req.body?.taskIds);
+    if (!hb.alive) return res.status(410).json({ error: "WORKER_DEAD" });
     // claimMode rides along so running workers follow a coordinator restarted in the other mode.
-    res.json({ ok: true, claimMode: config.claimMode });
+    // cancel: speculated tasks this worker should drop (the other attempt won, or its copy ended).
+    res.json({ ok: true, claimMode: config.claimMode, cancel: hb.cancel });
   });
 
   app.post("/workers/:id/deregister", async (req, res) => {

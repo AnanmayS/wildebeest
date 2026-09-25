@@ -4,6 +4,7 @@ import { config } from "../src/config.js";
 import { resetMetricsCache } from "../src/metrics.js";
 import { setDockerOps } from "../src/docker.js";
 import { resetInvariants } from "../src/invariants.js";
+import { resetSpeculation } from "../src/speculation.js";
 import { resetSystemSnapshot } from "../src/system.js";
 import { setJitterSource } from "../src/tasks.js";
 import { telemetry } from "../src/telemetry.js";
@@ -38,6 +39,8 @@ export async function resetState() {
   config.claimMode = CLAIM_MODE;
   config.dispatchMode = "push";
   telemetry.reset();
+  resetSpeculation();
+  config.speculation = "on";
   resetInvariants();
   resetSystemSnapshot();
   setJitterSource();

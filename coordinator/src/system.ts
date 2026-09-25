@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { query } from "./db.js";
 import { detectQueueTarget, isThrottled, queueDepths } from "./dispatcher.js";
 import { latestInvariants, type InvariantReport } from "./invariants.js";
+import { speculationSummary, type Probation } from "./speculation.js";
 import { presign } from "./storage.js";
 import { telemetry, type RecoveryRecord, type Stage, type TimingKey } from "./telemetry.js";
 
@@ -32,6 +33,8 @@ export interface SystemSnapshot {
     ageMs: number;
     attempt: number;
     imageUrl: string | null;
+    /** P3 (additive): the task's running speculative copy, if any (the lease itself stays the row). */
+    copy: { workerId: string; epoch: number; ageMs: number } | null;
   }>;
   timings: {
     windowSec: number;
@@ -48,7 +51,15 @@ export interface SystemSnapshot {
   invariants: InvariantReport;
   throughput: Array<{ t: string; detect: number; classify: number; images: number }>;
   cache: { hitsLast10m: number; hitRatePct: number };
-  speculation: { launched: number; won: number; wasted: number };
+  /** launched/won/wasted as in the v2 contract; the rest is P3 (additive). */
+  speculation: {
+    launched: number;
+    won: number;
+    wasted: number;
+    running: number;
+    enabled: boolean;
+    probation: Probation[];
+  };
   leader: { id: string; term: number; since: string } | null;
 }
 
@@ -60,19 +71,24 @@ const STAGES: Stage[] = ["detect", "classify"];
 const perSec = (n: number, seconds: number) => Math.round((n / seconds) * 100) / 100;
 
 async function buildSnapshot(): Promise<SystemSnapshot> {
-  const [depths, alive, inFlight, leaseRows, invariants] = await Promise.all([
+  const [depths, alive, inFlight, leaseRows, invariants, speculation] = await Promise.all([
     queueDepths(),
     query<{ stage: Stage; n: number }>(`select stage, count(*)::int as n from workers where status = 'ALIVE' group by stage`),
     query<{ stage: Stage; n: number }>(`select stage, count(*)::int as n from tasks where state = 'LEASED' group by stage`),
     query(
       `select t.id, t.worker_id, t.stage, t.lease_epoch, t.attempts, i.object_key,
-              (extract(epoch from (now() - t.started_at)) * 1000)::int as age_ms
+              (extract(epoch from (now() - t.started_at)) * 1000)::int as age_ms,
+              a.worker_id as copy_worker, a.epoch as copy_epoch,
+              (extract(epoch from (now() - a.started_at)) * 1000)::int as copy_age_ms
          from tasks t join images i on i.id = t.image_id
+         left join task_attempts a on t.spec_epoch is not null and a.task_id = t.id and a.state = 'running'
+                                  and a.shadow_epoch = t.lease_epoch
         where t.state = 'LEASED'
         order by t.started_at, t.id
         limit ${MAX_LEASES}`,
     ),
     latestInvariants(),
+    speculationSummary(),
   ]);
 
   const count = (rows: Array<{ stage: Stage; n: number }>, stage: Stage) => rows.find((r) => r.stage === stage)?.n ?? 0;
@@ -102,6 +118,9 @@ async function buildSnapshot(): Promise<SystemSnapshot> {
       // Which run this is: charged attempts so far plus the current one.
       attempt: (r.attempts as number) + 1,
       imageUrl: await presign(r.object_key),
+      copy: r.copy_worker
+        ? { workerId: r.copy_worker as string, epoch: r.copy_epoch as number, ageMs: Math.max(0, r.copy_age_ms as number) }
+        : null,
     })),
   );
 
@@ -140,7 +159,7 @@ async function buildSnapshot(): Promise<SystemSnapshot> {
       images: b.images,
     })),
     cache: telemetry.cache(),
-    speculation: { launched: 0, won: 0, wasted: 0 },
+    speculation,
     leader: null,
   };
 }

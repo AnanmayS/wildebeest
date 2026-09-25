@@ -3,6 +3,7 @@ import { query } from "./db.js";
 import { dispatchOnce, rebuildQueues } from "./dispatcher.js";
 import { checkInvariants } from "./invariants.js";
 import { reapOnce, reaperStalls } from "./reaper.js";
+import { speculateOnce } from "./speculation.js";
 import { flushCompleteTimings } from "./tasks.js";
 
 /** Runs fn every intervalMs, never overlapping itself; returns a stop function. */
@@ -34,6 +35,7 @@ export function startLoops() {
     }),
     every("invariants", config.invariantIntervalMs, checkInvariants),
     every("timings", 1000, flushCompleteTimings),
+    every("speculation", config.speculateIntervalMs, speculateOnce),
   ];
   return () => stops.forEach((s) => s());
 }
