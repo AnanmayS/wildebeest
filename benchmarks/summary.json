@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-25T22:44:41Z",
+  "generatedAt": "2026-09-26T01:57:09Z",
   "machine": "Apple M2, Docker Desktop 8 vCPU / 8 GB",
   "ceiling": {
     "taskMs": [
@@ -13,45 +13,39 @@
         "points": [
           {
             "workers": 1,
-            "throughput": 175.2,
-            "p50Ms": 1.83,
-            "p99Ms": 11.91
+            "throughput": 1320.2,
+            "p50Ms": 5.2,
+            "p99Ms": 11.94
           },
           {
             "workers": 2,
-            "throughput": 235.6,
-            "p50Ms": 1.97,
-            "p99Ms": 10.06
+            "throughput": 3398.1,
+            "p50Ms": 2.76,
+            "p99Ms": 12.42
           },
           {
             "workers": 4,
-            "throughput": 237.1,
-            "p50Ms": 3.02,
-            "p99Ms": 15.59
+            "throughput": 4087.1,
+            "p50Ms": 4.0,
+            "p99Ms": 18.62
           },
           {
             "workers": 8,
-            "throughput": 242.7,
-            "p50Ms": 3.99,
-            "p99Ms": 15.74
+            "throughput": 3147.2,
+            "p50Ms": 9.74,
+            "p99Ms": 36.09
           },
           {
             "workers": 16,
-            "throughput": 240.0,
-            "p50Ms": 4.73,
-            "p99Ms": 27.12
+            "throughput": 4480.7,
+            "p50Ms": 20.59,
+            "p99Ms": 67.97
           },
           {
             "workers": 32,
-            "throughput": 240.6,
-            "p50Ms": 16.11,
-            "p99Ms": 58.18
-          },
-          {
-            "workers": 64,
-            "throughput": 235.8,
-            "p50Ms": 33.32,
-            "p99Ms": 137.49
+            "throughput": 5438.4,
+            "p50Ms": 37.32,
+            "p99Ms": 146.76
           }
         ]
       },
@@ -60,45 +54,39 @@
         "points": [
           {
             "workers": 1,
-            "throughput": 76.1,
-            "p50Ms": 9.08,
-            "p99Ms": 19.11
+            "throughput": 89.5,
+            "p50Ms": 9.42,
+            "p99Ms": 18.59
           },
           {
             "workers": 2,
-            "throughput": 139.5,
-            "p50Ms": 8.96,
-            "p99Ms": 28.83
+            "throughput": 193.2,
+            "p50Ms": 8.5,
+            "p99Ms": 20.55
           },
           {
             "workers": 4,
-            "throughput": 239.8,
-            "p50Ms": 8.81,
-            "p99Ms": 15.94
+            "throughput": 377.9,
+            "p50Ms": 8.35,
+            "p99Ms": 17.67
           },
           {
             "workers": 8,
-            "throughput": 240.4,
-            "p50Ms": 9.19,
-            "p99Ms": 21.05
+            "throughput": 769.9,
+            "p50Ms": 14.83,
+            "p99Ms": 36.09
           },
           {
             "workers": 16,
-            "throughput": 235.1,
-            "p50Ms": 10.89,
-            "p99Ms": 27.48
+            "throughput": 1500.7,
+            "p50Ms": 17.18,
+            "p99Ms": 41.4
           },
           {
             "workers": 32,
-            "throughput": 237.4,
-            "p50Ms": 18.73,
-            "p99Ms": 71.69
-          },
-          {
-            "workers": 64,
-            "throughput": 231.1,
-            "p50Ms": 36.29,
-            "p99Ms": 211.83
+            "throughput": 1664.1,
+            "p50Ms": 232.22,
+            "p99Ms": 691.61
           }
         ]
       },
@@ -107,54 +95,48 @@
         "points": [
           {
             "workers": 1,
-            "throughput": 15.9,
-            "p50Ms": 56.24,
-            "p99Ms": 69.73
+            "throughput": 16.3,
+            "p50Ms": 56.62,
+            "p99Ms": 70.45
           },
           {
             "workers": 2,
-            "throughput": 31.8,
-            "p50Ms": 55.68,
-            "p99Ms": 69.57
+            "throughput": 33.0,
+            "p50Ms": 56.28,
+            "p99Ms": 68.76
           },
           {
             "workers": 4,
-            "throughput": 63.8,
-            "p50Ms": 55.47,
-            "p99Ms": 68.61
+            "throughput": 65.6,
+            "p50Ms": 56.44,
+            "p99Ms": 71.93
           },
           {
             "workers": 8,
-            "throughput": 128.6,
-            "p50Ms": 54.52,
-            "p99Ms": 71.68
+            "throughput": 135.5,
+            "p50Ms": 55.5,
+            "p99Ms": 65.4
           },
           {
             "workers": 16,
-            "throughput": 238.3,
-            "p50Ms": 54.36,
-            "p99Ms": 73.37
+            "throughput": 274.8,
+            "p50Ms": 54.28,
+            "p99Ms": 65.89
           },
           {
             "workers": 32,
-            "throughput": 232.5,
-            "p50Ms": 61.22,
-            "p99Ms": 121.06
-          },
-          {
-            "workers": 64,
-            "throughput": 207.0,
-            "p50Ms": 77.63,
-            "p99Ms": 506.72
+            "throughput": 499.2,
+            "p50Ms": 56.13,
+            "p99Ms": 75.38
           }
         ]
       }
     ],
     "usl": {
       "taskMs": 0,
-      "lambda": 186.96,
-      "alpha": 0.72001,
-      "beta": 0.0012696
+      "lambda": 1864.48,
+      "alpha": 0.36157,
+      "beta": 0.0
     }
   },
   "real": {
@@ -188,9 +170,9 @@
       "samples": 22
     },
     "after": {
-      "p50Ms": null,
-      "p95Ms": null,
-      "samples": 0
+      "p50Ms": 163.0,
+      "p95Ms": 327.0,
+      "samples": 20
     }
   },
   "overhead": {
@@ -198,12 +180,12 @@
       "perTaskMs": 7.88
     },
     "after": {
-      "perTaskMs": null
+      "perTaskMs": 4.82
     }
   },
   "faults": {
-    "runs": 12,
-    "faultsInjected": 60,
-    "violations": 4
+    "runs": 6,
+    "faultsInjected": 30,
+    "violations": 0
   }
 }

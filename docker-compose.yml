@@ -138,6 +138,9 @@ services:
 
   coordinator-2:
     extends: { service: coordinator }
+    # Same image as `coordinator`; only that service builds it (two builds of one tag race in BuildKit).
+    build: !reset null
+    pull_policy: never
     environment:
       COORDINATOR_ID: ${COORDINATOR_2_ID:-coord-2}
     depends_on:

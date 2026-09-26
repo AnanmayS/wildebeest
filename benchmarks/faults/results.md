@@ -4,4 +4,5 @@ Jepsen-lite: seeded fault schedules against a running fake-backend job, then an 
 
 | Code | Runs | Faults injected | Violations | Violations by invariant | Fenced late results | Failed images | Re-executions |
 |---|---|---|---|---|---|---|---|
+| [after](after/results.md) | 6 | 30 | **0** | – | 6 | 0 | 56 |
 | [before](before/results.md) | 12 | 60 | **4** | I7 job_finishes: 4 | 52 | 71 | 203 |

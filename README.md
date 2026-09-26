@@ -12,11 +12,11 @@ The workload is real: MegaDetector drops the empty frames (about 72% of a Snapsh
 
 | | Before | After |
 |---|---|---|
-| Orchestration ceiling, 0 ms tasks (tasks/s) | ~240, flat from N = 2 (dispatcher refill cap) | **{{AFTER_CEILING_0MS}}** at N = {{AFTER_CEILING_N}} worker loops |
-| Per-task orchestration overhead, 1 worker loop | 7.9 ms | **{{AFTER_OVERHEAD_MS}} ms** |
-| Open-loop latency p50 at 50% load (from intended arrival) | 156 ms | **{{AFTER_OPENLOOP_P50}} ms** |
-| Worker SIGKILL → all its tasks re-claimed, p50 / p95 | 5.6 s / 6.7 s (22 kills) | **{{AFTER_RECOVERY_P50}} / {{AFTER_RECOVERY_P95}} ms** (20 kills) |
-| Seeded fault matrix | 12 runs, 60 faults: 0 safety, 4 liveness violations (orphaned `BLMOVE`) | **{{FAULT_RUNS}} runs, {{FAULT_FAULTS}} faults, {{FAULT_VIOLATIONS}} violations** |
+| Orchestration ceiling, 0 ms tasks (tasks/s) | ~240, flat from N = 2 (dispatcher refill cap) | **~4,500** at N = 16 worker loops |
+| Per-task orchestration overhead, 1 worker loop | 7.9 ms | **4.8 ms** |
+| Open-loop latency p50 at the same offered load (120–240 tasks/s, 8 loops, 5 ms tasks) | 156–3,517 ms | **15–17 ms** |
+| Worker SIGKILL → all its tasks re-claimed, p50 / p95 | 5.6 s / 6.7 s (22 kills) | **163 / 327 ms** (20 kills) |
+| Seeded fault matrix | 12 runs, 60 faults: 0 safety, 4 liveness violations (orphaned `BLMOVE`) | **6 runs, 30 faults, 0 violations** |
 | Coordinator failover, leader SIGKILL | single coordinator: no failover | **5.3 s p50** (≈ the 5 s lease TTL); 0.18 s on graceful stop |
 | Writes accepted from a deposed leader's stale term | n/a | **0 in 72 failover runs** (100 fenced attempts refused) |
 | Job makespan with one 10× straggler | 28.8 s | **23.9 s** (−17%, speculative copies) |
@@ -105,7 +105,7 @@ stateDiagram-v2
 
 | Fault | What happens | How it's tested | Measured |
 |---|---|---|---|
-| Worker SIGKILL (container) | Docker `die` event → worker `DEAD` → its leases and processing list requeued and `LPUSH`ed to the queue head. Not charged if we caused the kill. | `recovery.test.ts`, integration `chaos`, bench recovery suite, fault matrix `kill` | {{AFTER_RECOVERY_P50}} ms p50 / {{AFTER_RECOVERY_P95}} ms p95 kill → re-claimed (before: 5.6 s / 6.7 s) |
+| Worker SIGKILL (container) | Docker `die` event → worker `DEAD` → its leases and processing list requeued and `LPUSH`ed to the queue head. Not charged if we caused the kill. | `recovery.test.ts`, integration `chaos`, bench recovery suite, fault matrix `kill` | 163 ms p50 / 327 ms p95 kill → re-claimed (before: 5.6 s / 6.7 s) |
 | Worker SIGKILL, no Docker event (native worker, other host) | Heartbeat backstop: `DEAD` after 6 s of silence plus reaper stall grace | `recovery.test.ts` with `DOCKER_EVENTS=off` | 5.1–7.2 s re-claimed (5 kills, P1) |
 | Worker frozen past its lease (`docker pause`, SIGSTOP) | Declared dead, task re-leased at a higher epoch. On wake: `410` on heartbeat, and its one late result gets `409 STALE_LEASE` | `state-machine.test.ts`, fault matrix `pause`, dashboard Pause | 52 late results fenced, 0 accepted (before matrix) |
 | Straggler (slow but alive) | Speculative copy on the fastest idle worker; first commit wins; the loser gets `ALREADY_DONE` | `speculation.test.ts` (23 tests), makespan trials | −17% makespan, 0 duplicate results |
@@ -129,7 +129,22 @@ stateDiagram-v2
 
 **Recovery distribution.** 20+ SIGKILLs of busy fake-model detector containers, timed entirely from `task_events` on the Postgres clock: kill → marked dead → requeued → every task re-claimed.
 
-{{AFTER_TABLE}}
+| Worker loops | 0 ms tasks, before → after | 5 ms tasks, before → after | 50 ms tasks, before → after |
+|---|---|---|---|
+| 1 | 175 → 1,320 | 76 → 90 | 16 → 16 |
+| 2 | 236 → 3,398 | 140 → 193 | 32 → 33 |
+| 4 | 237 → 4,087 | 240 → 378 | 64 → 66 |
+| 8 | 243 → 3,147 | 240 → 770 | 129 → 136 |
+| 16 | 240 → **4,481 ± 539** | 235 → **1,501 ± 140** | 238 → 275 |
+| 32 | 241 → 5,438 | 237 → 1,664 | 233 → **499** |
+
+Tasks/s, mean of 3 trials (fake backend, synthetic tasks; before = pre-improvement code with sample
+jobs). The old code is flat at ~240 tasks/s at every task time: the 200 ms dispatcher refill of 50 IDs.
+The new code scales with workers at 5 and 50 ms. The 0 ms series is noisy (single trials 1,051–7,073)
+because Postgres saturates the laptop VM; the 16-loop point is the stable one. Per-point confidence
+intervals, the USL fit and Little's-law checks are in
+[benchmarks/ceiling/results.md](benchmarks/ceiling/results.md). Latency at equal offered load:
+[openloop_matched.md](benchmarks/ceiling/after/openloop_matched.md) (p50 15–17 ms vs 156–3,517 ms).
 
 ![Ceiling](benchmarks/ceiling/after/ceiling.png)
 ![Before vs after](benchmarks/ceiling/ceiling_compare.png)
