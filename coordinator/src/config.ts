@@ -33,8 +33,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     s3Bucket: str(env, "S3_BUCKET", "wildebeest"),
     sampleDir: str(env, "SAMPLE_DIR", "/data/sample"),
 
-    detectorModelVersion: str(env, "DETECTOR_MODEL_VERSION", "speciesnet-md_v5a"),
-    classifierModelVersion: str(env, "CLASSIFIER_MODEL_VERSION", "speciesnet-v4.0.1a"),
+    detectorModelVersion: str(env, "DETECTOR_MODEL_VERSION", "speciesnet-md_v5a.0.1-640"),
+    classifierModelVersion: str(env, "CLASSIFIER_MODEL_VERSION", "speciesnet-v4.0.3a"),
 
     leaseMs: num(env, "LEASE_MS", 15000),
     heartbeatMs: num(env, "HEARTBEAT_MS", 2000),

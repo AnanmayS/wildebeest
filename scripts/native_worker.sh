@@ -77,6 +77,8 @@ export PYTORCH_ENABLE_MPS_FALLBACK="${PYTORCH_ENABLE_MPS_FALLBACK:-1}"
 export WORKER_RUNTIME=native
 export WORKER_DEVICE="${WORKER_DEVICE:-$DEVICE}"
 export WORKER_CONTAINER_ID="${WORKER_CONTAINER_ID:-native-$HOST_SHORT}"
+# Set WORKER_HOSTNAME to run a second native worker of the same stage on this host (it becomes the worker ID).
+export WORKER_HOSTNAME="${WORKER_HOSTNAME:-}"
 export PYTHONPATH="$ROOT/worker${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 
