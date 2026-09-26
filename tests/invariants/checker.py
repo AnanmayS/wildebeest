@@ -86,37 +86,58 @@ def check_single_success(h: History) -> list[Violation]:
     return out
 
 
+def _spec_epoch(e: dict) -> int | None:
+    """A `speculated` event records the copy's epoch as detail.epoch."""
+    ep = (e.get("detail") or {}).get("epoch")
+    return int(ep) if ep is not None else None
+
+
 def check_epochs(h: History) -> tuple[list[Violation], int]:
-    """I3 + I4. Returns violations and the number of completions whose epoch could not be checked."""
+    """I3 + I4. Returns violations and the number of completions whose epoch could not be checked.
+
+    Speculation (P3) means a task can have two valid attempts at once: the lease (its latest claim)
+    and one speculative copy started next to it (`speculated`, detail.epoch). Either may win; a new
+    claim invalidates both. So an accepted completion must carry an epoch from the currently valid
+    set, all claim/copy epochs must strictly increase, and tasks.lease_epoch ends as the winner's epoch.
+    """
     out, unverifiable = [], 0
     by_task: dict[str, list[dict]] = defaultdict(list)
     for e in h.events:
-        if e.get("task_id") and e["type"] in ("claimed", "succeeded"):
+        if e.get("task_id") and e["type"] in ("claimed", "speculated", "succeeded"):
             by_task[e["task_id"]].append(e)
     tasks = {t["id"]: t for t in h.tasks}
     for tid, evs in by_task.items():
         evs.sort(key=lambda e: e["id"])
-        last_claim: int | None = None
+        highest: int | None = None  # every epoch handed out so far, lease or copy
+        valid: set[int] = set()  # attempts that may still commit
+        winner: int | None = None
         for e in evs:
-            ep = _epoch(e)
-            if e["type"] == "claimed":
+            if e["type"] in ("claimed", "speculated"):
+                ep = _epoch(e) if e["type"] == "claimed" else _spec_epoch(e)
                 if ep is None:
                     unverifiable += 1
                     continue
-                if last_claim is not None and ep <= last_claim:
-                    out.append(Violation("I4 epochs_increase", tid, f"claimed epoch {ep} after epoch {last_claim}"))
-                last_claim = ep if last_claim is None else max(last_claim, ep)
+                if highest is not None and ep <= highest:
+                    out.append(Violation("I4 epochs_increase", tid, f"{e['type']} epoch {ep} after epoch {highest}"))
+                highest = ep if highest is None else max(highest, ep)
+                valid = {ep} if e["type"] == "claimed" else valid | {ep}
             else:  # succeeded
-                if ep is None or last_claim is None:
+                ep = _epoch(e)
+                if ep is None or not valid:
                     unverifiable += 1
                     continue
-                if ep != last_claim:
+                if ep not in valid:
                     out.append(Violation("I3 fenced_completion", tid,
-                                         f"completion accepted with epoch {ep}, latest claim was {last_claim}"))
+                                         f"completion accepted with epoch {ep}, valid attempts were {sorted(valid)}"))
+                    continue  # already reported; don't also flag the task row it left behind
+                winner = ep
         t = tasks.get(tid)
-        if t is not None and last_claim is not None and t.get("lease_epoch") is not None and t["lease_epoch"] != last_claim:
-            out.append(Violation("I4 epochs_increase", tid,
-                                 f"tasks.lease_epoch={t['lease_epoch']} but last claimed epoch {last_claim}"))
+        expected = winner if winner is not None else (max(valid) if valid else None)
+        if t is not None and expected is not None and t.get("lease_epoch") is not None:
+            ok = t["lease_epoch"] == expected if winner is not None else t["lease_epoch"] in valid
+            if not ok:
+                out.append(Violation("I4 epochs_increase", tid,
+                                     f"tasks.lease_epoch={t['lease_epoch']} but expected {expected}"))
     return out, unverifiable
 
 

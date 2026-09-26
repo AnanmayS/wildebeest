@@ -114,6 +114,8 @@ services:
       # Full-jitter backoff before a failed task is retried: random(0, min(max, base * 2^errors)).
       RETRY_BASE_MS: ${RETRY_BASE_MS:-500}
       RETRY_MAX_MS: ${RETRY_MAX_MS:-30000}
+      # Shown as an "Open traces in Grafana" link on the dashboard when set (make observability sets it).
+      GRAFANA_PUBLIC_URL: ${GRAFANA_PUBLIC_URL:-}
       # Straggler speculation (on | off): when a stage's queue is empty and a worker is idle, a task
       # running > max(SPECULATE_MIN_MS, SPECULATE_MULTIPLIER × stage p50) gets one copy on the fastest
       # idle worker; the first result wins. Workers slower than PROBATION × stage p50 get no copies.

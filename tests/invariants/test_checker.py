@@ -80,6 +80,38 @@ def test_epoch_not_increasing():
     assert "I4 epochs_increase" in names(v)
 
 
+def spec(i, epoch, worker="detect-c"):
+    """A speculative copy started next to the current lease (P3): `speculated` with detail.epoch."""
+    return {"id": i, "task_id": TASK, "worker_id": worker, "type": "speculated", "at": None, "detail": {"epoch": epoch}}
+
+
+def speculated_history(winner: int) -> History:
+    """claim(1) on a straggler → copy at epoch 2 → the winner's epoch succeeds; the loser gets ALREADY_DONE."""
+    h = good()
+    h.events = [ev(1, "claimed", epoch=1), spec(2, 2), ev(3, "succeeded", epoch=winner)]
+    h.tasks[0]["lease_epoch"] = winner
+    return h
+
+
+@pytest.mark.parametrize("winner", [1, 2])
+def test_either_speculative_attempt_may_win(winner):
+    v, unverifiable = check_epochs(speculated_history(winner))
+    assert v == [] and unverifiable == 0
+
+
+def test_attempt_before_the_copy_is_still_fenced():
+    h = good()  # claim(1) lost → claim(2) → copy(3); epoch 1 is stale even though a copy exists
+    h.events = [ev(1, "claimed", epoch=1), ev(2, "claimed", epoch=2), spec(3, 3), ev(4, "succeeded", epoch=1)]
+    h.tasks[0]["lease_epoch"] = 1
+    assert "I3 fenced_completion" in names(check_epochs(h)[0])
+
+
+def test_task_row_must_hold_the_winners_epoch():
+    h = speculated_history(2)
+    h.tasks[0]["lease_epoch"] = 1
+    assert "I4 epochs_increase" in names(check_epochs(h)[0])
+
+
 def test_missing_epoch_is_unverifiable_not_violation():
     h = good()
     h.events[3] = {**h.events[3], "detail": {}}

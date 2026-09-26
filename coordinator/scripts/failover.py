@@ -211,10 +211,7 @@ def run_once(stack: Stack, scenario: str, args, checker) -> dict:
     if checker is not None:
         with psycopg.connect(stack.pg_url) as c:
             h = checker.load_history(c, [job])
-        # A speculative copy (P3) is a claim at a new epoch, recorded as `speculated` {epoch}. The
-        # checker predates speculation, so present those to it as the claims they are.
-        h.events = [dict(e, type="claimed", detail={"leaseEpoch": (e.get("detail") or {}).get("epoch")})
-                    if e["type"] == "speculated" else e for e in h.events]
+        # The checker understands speculative copies (`speculated` events) itself.
         report = checker.check_history(h)
         out["violations"] = report["violations"]
         out["stats"] = {k: report["stats"][k] for k in ("tasks", "failedImages", "staleRejected", "reassigned", "leaseExpired", "reexecutions")}

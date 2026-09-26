@@ -22,7 +22,7 @@ logs:
 
 ## Grafana + Tempo + Prometheus (http://localhost:3300); traces from every task, sampled at 10%
 observability:
-	OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.1 \
+	GRAFANA_PUBLIC_URL=http://localhost:3300 OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.1 \
 		docker compose --profile observability up -d --build --scale detector=$(DETECTORS) --scale classifier=$(CLASSIFIERS)
 
 ## Add a detector running natively on the Mac GPU (MPS) to the running stack
