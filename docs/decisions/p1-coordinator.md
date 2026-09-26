@@ -113,7 +113,7 @@ Other end-to-end checks (compose project `wb-p1`, fake workers):
 - **DECISIONS.md**: #12 (only lease expiry, death and `/fail` count) is refined by decisions 5–6 here; #36 (retries
   LPUSHed by the dispatcher) is now done by the recovery path itself (decision 4); `released` is now shown in the
   event log (dashboard request), contrary to #12's note.
-- **INTERVIEW_NOTES.md** still says a heartbeat renews every leased task of the worker (report's drift note) — not fixed
+- The interview notes (not in this repo) still said a heartbeat renews every leased task of the worker (report's drift note) — not fixed
   here (not my file).
 - `docker-compose.yml` coordinator env gained `DOCKER_EVENTS`, `RETRY_BASE_MS`, `RETRY_MAX_MS`. `WORKER_DEVICE` /
   `WORKER_RUNTIME` are read by the worker if set (native workers).

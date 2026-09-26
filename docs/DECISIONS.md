@@ -1,6 +1,6 @@
 # Decisions
 
-Choices made where the PRD was ambiguous or where the build deviated from it. Newest at the bottom.
+Choices made where the original spec was ambiguous or where the build deviated from it. Newest at the bottom.
 
 1. **Contracts file.** Exact payloads, Redis keys and ports live in `docs/CONTRACTS.md` so the
    coordinator, workers and dashboard could be built in parallel against one spec.
@@ -166,7 +166,7 @@ Choices made where the PRD was ambiguous or where the build deviated from it. Ne
    at 1280, which is what 640 px already buys; a smaller model's main win here would be memory, i.e. more workers.
 42. **Renamed ForgeGrid → Wildebeest.** The herd keeps moving when one animal falls, which is the fault-tolerance
    story, and the sample data is Serengeti. Renamed everywhere (package `wildebeest_worker`, database, bucket, Redis
-   keys, images). `docs/PRD.md` keeps the original name because it is a copy of the source spec.
+   keys, images). The original product spec (not in this repo) used the old name.
 
 ## Improvement program (2026-09-25)
 

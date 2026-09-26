@@ -1,6 +1,6 @@
 # Wildebeest interface contracts
 
-This file pins down the details the PRD (docs/PRD.md) leaves open, so the coordinator,
+This file pins down the details the original product spec leaves open, so the coordinator,
 workers, and dashboard can be built in parallel and still fit together. If you must
 change a contract, change it here and note it in docs/DECISIONS.md.
 

@@ -9,7 +9,7 @@ PYTHON ?= .venv/bin/python
 ## Bring everything up with the sample dataset ready, then open http://localhost:8080
 demo: sample up
 	@echo ""
-	@echo "Wildebeest is up: open http://localhost:8080 and click 'Load sample dataset'."
+	@echo "Wildebeest is up: open http://localhost:8080 and press 'Run a live demo'."
 
 up:
 	docker compose up -d --build --scale detector=$(DETECTORS) --scale classifier=$(CLASSIFIERS)

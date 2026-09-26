@@ -15,7 +15,7 @@
     "I7 job_finishes": 4
   },
   "seed": 42,
-  "target": "/private/tmp/claude-501/-Users-ananmaysingh-wildlife-dectect/6d66ac29-256d-437a-ac57-2985dbfa8d4a/scratchpad/wb-before",
+  "target": "pre-improvement checkout (commit 499ddbd)",
   "project": "wb-before",
   "machine": "Apple M2, Docker Desktop 8 vCPU / 8 GB",
   "generatedAt": "2026-09-25T22:44:40Z",

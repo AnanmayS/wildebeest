@@ -143,7 +143,7 @@ class Stack:
 def load_checker(path: str | None):
     candidates = [path] if path else []
     here = Path(__file__).resolve()
-    candidates += [str(here.parents[2] / "tests" / "invariants"), "/Users/ananmaysingh/wildlife-dectect/tests/invariants"]
+    candidates += [str(here.parents[2] / "tests" / "invariants")]
     for c in candidates:
         if c and Path(c, "checker.py").exists():
             sys.path.insert(0, c)
