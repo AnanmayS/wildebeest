@@ -22,7 +22,8 @@ const postJson = <T>(path: string, body: unknown) =>
 export const api = {
   listJobs: () => request<{ jobs: JobSummary[] }>('/jobs').then((r) => r.jobs),
   getJob: (id: string) => request<JobSummary>(`/jobs/${id}`),
-  startSample: (size: number) => postJson<{ jobId: string }>('/jobs/sample', { size }),
+  startSample: (size: number, opts: { fresh?: boolean; random?: boolean } = {}) =>
+    postJson<{ jobId: string }>('/jobs/sample', { size, ...opts }),
   listWorkers: () => request<{ workers: Worker[] }>('/workers').then((r) => r.workers),
   killWorker: (id: string) => postJson<{ ok: boolean }>(`/workers/${id}/kill`, {}),
   /** v2: `docker pause` for ms, then unpause. 409 NOT_A_CONTAINER for native workers. */

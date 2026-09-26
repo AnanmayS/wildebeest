@@ -63,8 +63,11 @@ export async function createJob(opts: {
   countryCode?: string | null;
   sampleSize?: number | null;
   images: ImageInput[];
+  /** Skip the content-hash cache so every image is processed again (the live demo). Results are
+   * still written idempotently, so re-running a cached photo can't create a second result. */
+  fresh?: boolean;
 }): Promise<{ jobId: string; total: number; cacheHits: number; done: boolean }> {
-  const shas = [...new Set(opts.images.map((i) => i.sha256))];
+  const shas = opts.fresh ? [] : [...new Set(opts.images.map((i) => i.sha256))];
   const [dets, clss] = await Promise.all([
     query(`select sha256, detections from detection_results where model_version = $1 and sha256 = any($2::text[])`, [
       config.detectorModelVersion,
@@ -330,10 +333,17 @@ async function hashFile(file: string): Promise<string> {
 
 export class SampleUnavailableError extends Error {}
 
-export async function createSampleJob(size: number, countryCode?: string | null) {
+export async function createSampleJob(
+  size: number,
+  countryCode?: string | null,
+  opts: { fresh?: boolean; random?: boolean } = {},
+) {
   const files = listSample();
   if (files.length === 0) throw new SampleUnavailableError(`no sample images found in ${config.sampleDir}`);
-  const chosen = files.slice(0, Math.max(1, Math.min(Math.floor(size), files.length)));
+  const n = Math.max(1, Math.min(Math.floor(size), files.length));
+  // `random` draws a different subset each time (a demo shows new animals); the default stays the
+  // deterministic, balanced prefix so benchmarks and cache reruns see the same photos.
+  const chosen = opts.random ? shuffled(files).slice(0, n) : files.slice(0, n);
   const images = await mapLimit(chosen, 32, async (name): Promise<ImageInput> => {
     const file = path.join(config.sampleDir, name);
     return {
@@ -343,7 +353,16 @@ export async function createSampleJob(size: number, countryCode?: string | null)
       read: () => fs.promises.readFile(file),
     };
   });
-  return createJob({ name: `sample-${chosen.length}`, countryCode, sampleSize: chosen.length, images });
+  return createJob({ name: `sample-${chosen.length}`, countryCode, sampleSize: chosen.length, images, fresh: opts.fresh });
+}
+
+function shuffled<T>(items: T[]): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------

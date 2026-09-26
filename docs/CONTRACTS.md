@@ -689,3 +689,11 @@ is unchanged: `ALREADY_DONE` for the attempt that lost a speculation race, `STAL
   a connection reset). It costs a release, not an attempt.
 - `system.invariants`: each check runs with a statement timeout (`INVARIANT_TIMEOUT_MS`, 2 s); a check that times out
   keeps its previous value.
+
+## Demo refinements
+
+`POST /jobs/sample` accepts two optional flags (defaults unchanged):
+- `"fresh": true` skips the content-hash cache lookup, so every image is processed by the workers again.
+  Result writes stay idempotent (`ON CONFLICT DO NOTHING`), so a cached photo still ends with one result row.
+- `"random": true` picks a random subset of the sample instead of the deterministic balanced prefix.
+The dashboard's Story view "Run a live demo" sends both; benchmarks and "Rerun (cache)" send neither.

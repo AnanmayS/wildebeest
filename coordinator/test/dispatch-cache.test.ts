@@ -5,7 +5,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { config } from "../src/config.js";
 import { getPool, query } from "../src/db.js";
 import { dispatchOnce, isThrottled } from "../src/dispatcher.js";
-import { cancelJob, jobSummary, listSample, orderSample, parseCsv } from "../src/jobs.js";
+import { cancelJob, createJob, jobSummary, listSample, orderSample, parseCsv } from "../src/jobs.js";
 import { getRedis, keys } from "../src/redis.js";
 import { categorize, categorizeSpecies, enqueueClassify, storeDetection } from "../src/results.js";
 import { completeTask } from "../src/tasks.js";
@@ -163,6 +163,22 @@ describe("content-hash cache", () => {
     }
     expect(await job(jobId)).toMatchObject({ status: "done" });
   }
+
+  it("reprocesses cached photos when a job asks for fresh results, still keeping one result each", async () => {
+    const seeds = ["empty1", "lion"];
+    const results = { empty1: detectResult([]), lion: detectResult([{ label: "animal", conf: 0.9 }]) };
+    const first = await makeJob(seeds);
+    await processAll(first.jobId, results, { lion: "lion" });
+
+    const fresh = await createJob({ name: "demo", images: seeds.map(fakeImage), fresh: true });
+    expect(fresh).toMatchObject({ total: 2, cacheHits: 0, done: false });
+    expect((await tasksOfJob(fresh.jobId)).map((t) => t.stage)).toEqual(["detect", "detect"]);
+    await processAll(fresh.jobId, results, { lion: "lion" });
+
+    expect((await jobSummary(fresh.jobId))!).toMatchObject({ status: "done", processed: 2, cacheHits: 0 });
+    const { rows } = await query(`select count(*)::int as n from detection_results`);
+    expect(rows[0].n).toBe(2); // idempotent writes: the rerun didn't add result rows
+  });
 
   it("finishes a resubmitted job immediately, with no tasks, from cached results", async () => {
     const seeds = ["empty1", "person", "lion"];

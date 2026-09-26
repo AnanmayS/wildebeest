@@ -110,7 +110,10 @@ export function createApp() {
   app.post("/jobs/sample", async (req, res) => {
     const size = Number(req.body?.size ?? 1000);
     if (!Number.isFinite(size) || size < 1) return res.status(400).json({ error: "size must be a positive number" });
-    const { jobId } = await createSampleJob(size, req.body?.countryCode);
+    const { jobId } = await createSampleJob(size, req.body?.countryCode, {
+      fresh: req.body?.fresh === true,
+      random: req.body?.random === true,
+    });
     res.json({ jobId });
   });
 

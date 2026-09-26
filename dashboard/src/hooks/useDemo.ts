@@ -25,7 +25,9 @@ export function useDemo(live: Live) {
   const run = useCallback(async () => {
     setStarting(true);
     try {
-      const jobId = await live.startSample(DEMO_SIZE);
+      // A fresh, random batch: the photos really go through the workers (so there is work to crash)
+      // and the visitor sees different animals each time. Engineer view's "Rerun (cache)" shows the cache.
+      const jobId = await live.startSample(DEMO_SIZE, { fresh: true, random: true });
       push({ kind: 'run', at: Date.now(), jobId, size: DEMO_SIZE });
     } catch (err) {
       live.logLocal('failed', `Could not start the demo: ${(err as Error).message}`);
