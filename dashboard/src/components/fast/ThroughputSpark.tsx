@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ThroughputPoint } from '../../hooks/useThroughputSeries';
-import { fmtRate } from '../../lib/format';
+import type { JobSummary } from '../../lib/types';
+import { fmtDuration, fmtInt, fmtRate } from '../../lib/format';
 import { Card } from '../ui/Card';
 
 const W = 300;
@@ -30,7 +31,7 @@ export function MiniSpark({ series }: { series: ThroughputPoint[] }) {
 }
 
 /** Images finalised per second over the last two minutes, 5 s moving average, with a hover readout. */
-export function ThroughputSpark({ series }: { series: ThroughputPoint[] }) {
+export function ThroughputSpark({ series, job }: { series: ThroughputPoint[]; job?: JobSummary | null }) {
   const [hover, setHover] = useState<number | null>(null);
   const smooth = smoothed(series);
   const max = Math.max(1, ...smooth) * 1.15;
@@ -41,6 +42,8 @@ export function ThroughputSpark({ series }: { series: ThroughputPoint[] }) {
   const current = smooth.at(-1) ?? 0;
   const peak = Math.max(0, ...smooth);
   const shown = hover != null ? series[hover] : null;
+  // At rest a dead "0.0" is not a result: say it's idle and what the last job did.
+  const idle = !shown && job?.status !== 'running' && current < 0.05;
 
   return (
     <Card
@@ -48,15 +51,25 @@ export function ThroughputSpark({ series }: { series: ThroughputPoint[] }) {
       caption="Photos finalised per second, last 2 minutes."
       aside={shown ? `${Math.round((Date.now() - shown.t) / 1000)} s ago` : `peak ${fmtRate(peak)}/s`}
     >
-      <div className="flex items-baseline gap-1.5">
-        <span className="text-[30px] font-semibold leading-none">{fmtRate(shown ? smooth[hover!] : current)}</span>
-        <span className="text-[13px] text-ink-400">images/s</span>
-        {shown?.detect != null && (
-          <span className="ml-auto text-[12px] tabular text-ink-400">
-            detect {shown.detect} · classify {shown.classify}
+      {idle ? (
+        <div className="flex items-baseline gap-2">
+          <span className="text-[22px] font-semibold leading-none text-ink-300">Idle</span>
+          <span className="truncate text-[13px] text-ink-400">
+            press <b className="text-ink-100">Load sample</b>
+            {job && <> · last job: {fmtInt(job.processed)} photos in {job.elapsedMs < 100 ? 'under 0.1s' : fmtDuration(job.elapsedMs)}{job.cacheHits === job.total && job.total > 0 ? ' (all from cache)' : ''}</>}
           </span>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[30px] font-semibold leading-none">{fmtRate(shown ? smooth[hover!] : current)}</span>
+          <span className="text-[13px] text-ink-400">images/s</span>
+          {shown?.detect != null && (
+            <span className="ml-auto text-[12px] tabular text-ink-400">
+              detect {shown.detect} · classify {shown.classify}
+            </span>
+          )}
+        </div>
+      )}
       <div
         className="relative mt-2"
         onMouseMove={(e) => {

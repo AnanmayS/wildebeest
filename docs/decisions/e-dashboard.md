@@ -190,3 +190,83 @@ mock: Compose project `wb-dash`, 3 detectors + 1 classifier at `FAKE_MODEL_DELAY
    event log; persisting the last few recovery records (or rebuilding them from `task_events`) would keep them.
 7. **`GET /config` has no `grafanaUrl`.** The link needs a build arg today; a `GRAFANA_PUBLIC_URL` env surfaced in
    `/config` would make it runtime-configurable. `docker-compose.yml` doesn't pass `VITE_GRAFANA_URL` either.
+
+## Story view (default) and resting-state fixes
+
+The page was too dense for a first 30 seconds, and at rest it told the wrong story: a giant red "653 s" recovery
+(a heartbeat-detected record from the native worker going quiet during a test restart, not a kill), "Leader
+failover … term 45, in 38 s" (term = number of test restarts), throughput 0.0, and jargon everywhere.
+
+### Two views
+
+A header switch next to the title, **Story | Engineer**. Story is the default; the choice is remembered in
+`localStorage` (`wildebeest.view`, wrapped in try/catch) and linkable as `#story` / `#engineer` (a hash wins
+over the stored choice). Engineer is the page described above, changed only by the resting-state fixes below;
+its job strip and demo controls (chaos, upload, rerun, sample size) show only in Engineer.
+
+### What Story shows (fits 1440×900 without scrolling)
+
+1. **What it is**, one line in 34 px: "Sorts wildlife camera photos across many computers — and keeps going when
+   one crashes." and one line under it.
+2. **A simplified live pipeline**: Photos in → Finding animals → Naming species → Sorted (empty / animals /
+   people). Workers are tiles: name (first 6 chars of a container id, or `aro.local`), Busy / Idle / Crashed /
+   Frozen (the same `workerStory` phases the lanes use), photos done, and a "Mac GPU" badge on the native MPS
+   worker. No queues, epochs or watermarks. Photos move along the arrows only on real changes: new task IDs held
+   by detect (or classify) workers, and increments of `job.processed` (a burst shows as three, not a hundred).
+   Crashed tiles stay up for 60 s. Above it, one status line: "Sorting 100 photos · 42 done · 1.2 a second" with
+   a progress bar, or "Idle — press Run a live demo" plus the last job's summary.
+3. **Three measured numbers** from `GET /benchmarks` (`src/lib/proof.ts`): recovery p50 after vs before
+   ("0.16 s, was 5.6 s"), ceiling after ÷ before ("~19×": 0 ms tasks at 16 loops, 4,481 ÷ 240), and fault-matrix
+   violations ("0 photos lost or counted twice after 30 failures … over 6 runs"). `summary.json` has no "before"
+   ceiling, so the first version's ~240 tasks/s (the 200 ms tick cap in benchmarks/ceiling/results.md) is a
+   constant; a `ceiling.before` series would be used if the harness ever writes one. Each number falls back on
+   its own to the README table if the endpoint is missing.
+4. **Try it**: "Run a live demo" (`POST /jobs/sample {size: 100}`, disabled while a job runs), "Crash a worker" and
+   "Freeze a worker" (20 s pause), enabled while a job runs; both target the busiest *container* detector (Docker
+   can't touch the native worker, and the lone classifier is left alone so the job can finish). The page never
+   clears the cache: a rerun of cached photos is narrated as such. Under the buttons, **What just happened**
+   (`src/lib/narration.ts`) tells each action from real events, one step per event, as it arrives. Plus a strip
+   of up to 12 animal crops from the current job (`GET /jobs/:id/images?category=animal`).
+
+The demo state lives in `App` so the narration survives a trip to Engineer and back.
+
+### Resting-state fixes (both views)
+
+- **Recovery**: `latestRecovery()` takes a filter. The page leads only with a failure detected during this page
+  session or in the last 10 minutes (`src/lib/recent.ts`), and only one somebody caused: a kill or pause (record
+  `killedAt`, or a `worker_killed` / `worker_paused` event up to 2 min before), or a container Docker saw exit.
+  A worker that simply went quiet stays in the event log. With nothing recent, Engineer's recovery card shows
+  the measured number ("163 ms p50 kill → task re-claimed, measured over 20 kills (p95 327 ms) · was 5.6 s").
+- **Failover**: the Leader failover line appears only for a failover in the last 10 minutes (or this session).
+  The coordinator pills keep the term in Engineer; Story never shows it.
+- **Idle**: Engineer's Throughput panel says "Idle · press Load sample · last job: 300 photos in under 0.1s (all
+  from cache)" instead of a dead "0.0", and the result store reads "finalised · idle".
+- **Impossible reclaim times are ignored.** After a pause the coordinator closed a recovery record with
+  `reclaimedAt` 25 s *before* `detectedAt` (before the pause, even) and `totalMs: 0`; the narration printed
+  "Back to work -18657 ms". A reclaim earlier than the requeue (250 ms slack) now counts as not closed, and the
+  lease-sighting fallback supplies the real claim.
+
+### Seen live (real models: 2 CPU detector containers, 1 classifier, native MPS `aro.local`)
+
+Cache cleared from the shell for these runs (`POST /admin/clear-cache`), never from the page.
+
+- Run with a warm cache: "Sent 100 sample camera photos in. / All 100 were already sorted: cached results come back
+  in under 0.1 s. / Nothing had to be computed, so there was no work in progress to crash this time."
+- Crash during a real run: "Crashed worker fc9bfd on purpose, like pulling its plug. / Noticed in 50 ms: Docker told
+  us, instead of waiting 6 s for missed check-ins. / Its 2 photos were handed to aro.local. / Back to work 0.70 s
+  after the crash. / Photos lost: 0 · counted twice: 0". Timings are from the container's exit (`worker_died.detail
+  .exitedAt`): Docker Desktop itself took 1.0 s to carry out that kill (2.0 s on an earlier one), which is Docker's
+  time, not the system's; the Engineer card still times from the kill request (1.7 s).
+- Freeze: "Froze worker fc9bfd for 20 s … / Missed its check-ins for 5.6 s, so it was declared dead. / Its photo was
+  handed to aro.local. / Back to work 5.6 s after the freeze. / When it woke up it tried to hand in an old answer;
+  the system rejected it because the photo had already been given to someone else. No double counting. / It's back
+  and taking new photos. / Photos lost: 0 · counted twice: 0" (the `stale_rejected` was epoch 3 ≠ 4).
+- The mock (`PORT=3999 node mock/server.mjs`) drives the same flow; with its five detectors the tiles go compact.
+
+### Coordinator gaps seen (not edited here)
+
+1. The recovery record for a paused worker closed with a `reclaimedAt` before its `detectedAt` (see above).
+2. `recovery[]` keeps heartbeat-detected records for the native worker's restarts indefinitely (653 s, 415 s …);
+   harmless now that the page filters them, but they are not failures anyone caused.
+3. During a real run, `aro.local` logged a burst of `lease_expired … "unacknowledged": true` events (9 in 8 s)
+   right after the crash; they cost no attempt, but they look like claim-confirms that never landed.

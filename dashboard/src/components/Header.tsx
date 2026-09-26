@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { uploadPhotos } from '../lib/api';
 import type { Connection, LiveJob } from '../hooks/useWildebeest';
+import type { ViewMode } from '../hooks/useViewMode';
 import type { Chaos } from '../lib/types';
 import { fmtDuration, fmtInt } from '../lib/format';
 import { useNow } from '../hooks/useNow';
@@ -14,15 +15,20 @@ interface Props {
   job: LiveJob | null;
   chaos: Chaos;
   onChaos: (next: Chaos) => void;
-  onStartSample: (size: number) => Promise<void>;
+  onStartSample: (size: number) => Promise<unknown>;
   onUploaded: (jobId: string) => Promise<void>;
   onError: (message: string) => void;
   /** Grafana (traces + Prometheus), when the observability profile is part of this deployment. */
   grafanaUrl?: string | null;
+  mode: ViewMode;
+  onMode: (mode: ViewMode) => void;
 }
 
-/** Title, the active job at a glance, and every demo control that isn't on a worker lane. */
-export function Header({ connection, job, chaos, onChaos, onStartSample, onUploaded, onError, grafanaUrl }: Props) {
+/**
+ * Title and the Story | Engineer switch. In Engineer view also the active job at a glance and every demo
+ * control that isn't on a worker lane; the Story view carries its own, simpler controls.
+ */
+export function Header({ connection, job, chaos, onChaos, onStartSample, onUploaded, onError, grafanaUrl, mode, onMode }: Props) {
   const [size, setSize] = useState(1000);
   const [starting, setStarting] = useState(false);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
@@ -63,10 +69,11 @@ export function Header({ connection, job, chaos, onChaos, onStartSample, onUploa
           <div className="flex items-center gap-2.5">
             <h1 className="text-[22px] font-semibold leading-none tracking-tight">Wildebeest</h1>
             <ConnectionPill connection={connection} />
+            <ViewToggle mode={mode} onMode={onMode} />
           </div>
           <p className="mt-1 text-[12.5px] leading-none text-ink-400">
             Fault-tolerant distributed camera-trap pipeline
-            {grafanaUrl && (
+            {grafanaUrl && mode === 'engineer' && (
               <>
                 {' · '}
                 <a href={grafanaUrl} target="_blank" rel="noreferrer" className="text-ink-300 underline decoration-ink-600 underline-offset-2 hover:text-leaf-300" title="Per-image traces (Tempo) and Prometheus metrics">
@@ -78,42 +85,70 @@ export function Header({ connection, job, chaos, onChaos, onStartSample, onUploa
         </div>
       </div>
 
-      <JobStrip job={job} />
+      {mode === 'engineer' ? <JobStrip job={job} /> : <div className="flex-1" />}
 
-      <div className="flex shrink-0 items-center gap-2">
-        <ChaosControl chaos={chaos} onChange={onChaos} />
-        <input ref={fileInput} type="file" accept="image/jpeg,image/png" multiple hidden onChange={(e) => upload(e.target.files)} />
-        <button className="btn btn-ghost px-2.5" disabled={uploadPct !== null} onClick={() => fileInput.current?.click()} title="Upload your own photos">
-          <UploadIcon />
-          {uploadPct === null ? <span className="sr-only">Upload photos</span> : `${Math.round(uploadPct * 100)}%`}
-        </button>
-        <button
-          className="btn btn-ghost"
-          disabled={!lastSampleSize || starting}
-          onClick={() => lastSampleSize && run(lastSampleSize)}
-          title="Submit the same photos again: every one is a content-hash cache hit and finalises without inference"
-        >
-          <RerunIcon />
-          Rerun (cache)
-        </button>
-        <div className="flex items-center rounded-lg border border-ink-700 bg-ink-850 p-0.5">
-          <label className="sr-only" htmlFor="sample-size">Sample size</label>
-          <select
-            id="sample-size"
-            value={size}
-            onChange={(e) => setSize(Number(e.target.value))}
-            className="h-8 cursor-pointer appearance-none rounded-md bg-transparent pl-3 pr-2 text-sm font-medium tabular text-ink-100 outline-none"
-          >
-            {SIZES.map((n) => (
-              <option key={n} value={n} className="bg-ink-900">{n.toLocaleString()} photos</option>
-            ))}
-          </select>
-          <button className="btn btn-primary h-8" disabled={starting} onClick={() => run(size)}>
-            {starting ? 'Starting…' : 'Load sample'}
+      {mode === 'engineer' && (
+        <div className="flex shrink-0 items-center gap-2">
+          <ChaosControl chaos={chaos} onChange={onChaos} />
+          <input ref={fileInput} type="file" accept="image/jpeg,image/png" multiple hidden onChange={(e) => upload(e.target.files)} />
+          <button className="btn btn-ghost px-2.5" disabled={uploadPct !== null} onClick={() => fileInput.current?.click()} title="Upload your own photos">
+            <UploadIcon />
+            {uploadPct === null ? <span className="sr-only">Upload photos</span> : `${Math.round(uploadPct * 100)}%`}
           </button>
+          <button
+            className="btn btn-ghost"
+            disabled={!lastSampleSize || starting}
+            onClick={() => lastSampleSize && run(lastSampleSize)}
+            title="Submit the same photos again: every one is a content-hash cache hit and finalises without inference"
+          >
+            <RerunIcon />
+            Rerun (cache)
+          </button>
+          <div className="flex items-center rounded-lg border border-ink-700 bg-ink-850 p-0.5">
+            <label className="sr-only" htmlFor="sample-size">Sample size</label>
+            <select
+              id="sample-size"
+              value={size}
+              onChange={(e) => setSize(Number(e.target.value))}
+              className="h-8 cursor-pointer appearance-none rounded-md bg-transparent pl-3 pr-2 text-sm font-medium tabular text-ink-100 outline-none"
+            >
+              {SIZES.map((n) => (
+                <option key={n} value={n} className="bg-ink-900">{n.toLocaleString()} photos</option>
+              ))}
+            </select>
+            <button className="btn btn-primary h-8" disabled={starting} onClick={() => run(size)}>
+              {starting ? 'Starting…' : 'Load sample'}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </header>
+  );
+}
+
+/** Story (plain language, for a first look) or Engineer (the whole machine). Also linkable as #story / #engineer. */
+function ViewToggle({ mode, onMode }: { mode: ViewMode; onMode: (m: ViewMode) => void }) {
+  const opts: { value: ViewMode; label: string; title: string }[] = [
+    { value: 'story', label: 'Story', title: 'What it does and why it matters, in plain words' },
+    { value: 'engineer', label: 'Engineer', title: 'The full system: queues, leases, epochs, timings, benchmarks' },
+  ];
+  return (
+    <div className="ml-1 flex shrink-0 rounded-md border border-ink-700 bg-ink-850 p-0.5" role="tablist" aria-label="View">
+      {opts.map((o) => (
+        <button
+          key={o.value}
+          role="tab"
+          aria-selected={mode === o.value}
+          title={o.title}
+          onClick={() => onMode(o.value)}
+          className={`h-6 rounded-[5px] px-2.5 text-[12.5px] font-semibold leading-none transition ${
+            mode === o.value ? 'bg-leaf-400/15 text-leaf-300' : 'text-ink-400 hover:text-ink-100'
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
 }
 

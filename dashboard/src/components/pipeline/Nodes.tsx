@@ -122,7 +122,10 @@ export function StoreNode({ job, system, imagesPerSec, series }: StoreProps) {
         {job && <span className="ml-1 text-[13px] font-normal text-ink-500">/ {fmtInt(job.total)}</span>}
       </Big>
       <Sub>
-        finalised{imagesPerSec != null && <> · <b className="font-semibold text-ink-100">{fmtRate(imagesPerSec)}</b>/s</>}
+        finalised
+        {job?.status === 'running'
+          ? imagesPerSec != null && <> · <b className="font-semibold text-ink-100">{fmtRate(imagesPerSec)}</b>/s</>
+          : <> · idle</>}
       </Sub>
       <MiniSpark series={series} />
       {inv ? (

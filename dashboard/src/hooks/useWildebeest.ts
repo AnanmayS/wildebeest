@@ -231,9 +231,10 @@ export function useWildebeest() {
   }, [workers]);
 
   // --- Actions -----------------------------------------------------------------
-  const startSample = useCallback(async (size: number) => {
+  const startSample = useCallback(async (size: number): Promise<string> => {
     const { jobId } = await api.startSample(size);
     acceptJob(await api.getJob(jobId), true);
+    return jobId;
   }, [acceptJob]);
 
   const focusJob = useCallback(async (jobId: string) => {

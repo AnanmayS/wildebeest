@@ -23,13 +23,44 @@ export interface RecoveryView {
 }
 
 const t = (iso: string | null | undefined) => (iso ? Date.parse(iso) : null);
+/** Timestamps come from two coordinator replicas and Postgres: allow this much disagreement. */
+const CLOCK_SLACK_MS = 250;
 
 /** Every lease the dashboard has seen in system.leases: task id -> [{ worker, epoch, claim time }]. */
 export type LeaseSightings = Map<string, { workerId: string; epoch: number; at: number }[]>;
 
-export function latestRecovery(system: SystemSnapshot | null, events: TaskEvent[], sightings?: LeaseSightings): RecoveryView | null {
-  const records = system?.recovery ?? [];
-  if (!records.length) return fromEvents(events, sightings);
+/** Which failures are worth telling: by default, every one. */
+export interface RecoveryFilter {
+  /** Only failures detected at or after this time (ms). */
+  since?: number;
+  /** Only this worker's failures. */
+  workerId?: string;
+  /** Skip deaths nobody caused: a heartbeat timeout with no kill or pause behind it. */
+  causedOnly?: boolean;
+}
+
+/** How long before a heartbeat-detected death a kill or pause still counts as its cause (a 20 s pause + 6 s timeout fits). */
+const CAUSE_WINDOW_MS = 120_000;
+
+/**
+ * Was this death something we can tell a story about? A kill or pause (from the coordinator's record or its
+ * events), or a container Docker saw exit. A worker that simply went quiet (a native process stopped during a
+ * restart, a laptop asleep) is not: it stays in the event log only.
+ */
+function wasCaused(workerId: string, detectedAt: number, via: string | undefined, killedAt: string | null | undefined, events: TaskEvent[]): boolean {
+  if (killedAt || via === 'docker_event') return true;
+  return events.some((e) =>
+    (e.type === 'worker_killed' || e.type === 'worker_paused') && e.workerId === workerId
+    && Date.parse(e.at) <= detectedAt && detectedAt - Date.parse(e.at) < CAUSE_WINDOW_MS);
+}
+
+export function latestRecovery(system: SystemSnapshot | null, events: TaskEvent[], sightings?: LeaseSightings, filter: RecoveryFilter = {}): RecoveryView | null {
+  const keep = (workerId: string, detectedAt: number, via: string | undefined, killedAt?: string | null) =>
+    (filter.since == null || detectedAt >= filter.since)
+    && (filter.workerId == null || workerId === filter.workerId)
+    && (!filter.causedOnly || wasCaused(workerId, detectedAt, via, killedAt, events));
+  const records = (system?.recovery ?? []).filter((r) => keep(r.workerId, Date.parse(r.detectedAt), r.via, r.killedAt));
+  if (!records.length) return fromEvents(events, sightings, keep);
   const r = records.reduce((a, b) => (Date.parse(b.detectedAt) > Date.parse(a.detectedAt) ? b : a));
   const detectedAt = Date.parse(r.detectedAt);
   const died = events.find((e) => e.type === 'worker_died' && e.workerId === r.workerId && Math.abs(Date.parse(e.at) - detectedAt) < 2000);
@@ -50,6 +81,13 @@ export function latestRecovery(system: SystemSnapshot | null, events: TaskEvent[
   let reclaimedBy = r.reclaimedBy;
   let totalMs = r.totalMs;
   let observed = false;
+  // A reclaim can't precede the requeue. Seen live after a pause: reclaimedAt 25 s before detectedAt (and
+  // before the pause itself), totalMs 0. Treat such a record as not closed and use the lease sightings.
+  if (reclaimedAt != null && reclaimedAt < (requeuedAt ?? detectedAt) - CLOCK_SLACK_MS) {
+    reclaimedAt = null;
+    reclaimedBy = null;
+    totalMs = null;
+  }
   if (reclaimedAt == null && r.tasks > 0 && sightings && requeuedEvents.length) {
     // The coordinator didn't close the record (its claim can race the record being opened): use the
     // claim times the dashboard read off system.leases, if it saw every requeued task leased again.
@@ -74,8 +112,12 @@ export function latestRecovery(system: SystemSnapshot | null, events: TaskEvent[
  * From the event log: a v1 coordinator, or a v2 replica restarted since the failure (its
  * `recovery` records are in memory). kill/pause -> died -> reassigned, reclaim from lease sightings.
  */
-function fromEvents(events: TaskEvent[], sightings?: LeaseSightings): RecoveryView | null {
-  const died = events.find((e) => e.type === 'worker_died' && e.workerId);
+function fromEvents(
+  events: TaskEvent[],
+  sightings: LeaseSightings | undefined,
+  keep: (workerId: string, detectedAt: number, via: string | undefined) => boolean,
+): RecoveryView | null {
+  const died = events.find((e) => e.type === 'worker_died' && e.workerId && keep(e.workerId, Date.parse(e.at), e.detail?.via as string | undefined));
   if (!died) return null;
   const diedAt = Date.parse(died.at);
   const cause = events.find((e) => (e.type === 'worker_killed' || e.type === 'worker_paused') && e.workerId === died.workerId && Date.parse(e.at) <= diedAt);

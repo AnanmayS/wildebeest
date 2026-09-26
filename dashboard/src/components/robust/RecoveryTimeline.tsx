@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { RecoveryView } from '../../lib/recovery';
+import type { Benchmarks } from '../../lib/types';
 import { fmtAgo, fmtMs, fmtSec, shortId } from '../../lib/format';
 import { Card } from '../ui/Card';
 
@@ -9,13 +10,15 @@ interface Props {
   /** v1 coordinators only detect death by heartbeat timeout. */
   dockerEvents: boolean;
   now: number;
+  /** Shown instead when nothing failed recently: the benchmark's kill → reclaimed distribution. */
+  measured?: Benchmarks['recovery'];
 }
 
 /**
  * The latest failure, kill → detected → requeued → reclaimed, drawn to scale against the
  * 6 s heartbeat timeout that used to be the only way to notice a dead worker.
  */
-export function RecoveryTimeline({ recovery: r, workerTimeoutMs, dockerEvents, now }: Props) {
+export function RecoveryTimeline({ recovery: r, workerTimeoutMs, dockerEvents, now, measured }: Props) {
   return (
     <Card
       title="Latest failure → recovery"
@@ -24,12 +27,31 @@ export function RecoveryTimeline({ recovery: r, workerTimeoutMs, dockerEvents, n
         : `A worker is declared dead after ${fmtSec(workerTimeoutMs)} without a heartbeat; then its task goes back to the head of the queue.`}
       aside={r ? fmtAgo(r.killedAt, now) : undefined}
     >
-      {r ? <Timeline r={r} workerTimeoutMs={workerTimeoutMs} /> : (
+      {r ? <Timeline r={r} workerTimeoutMs={workerTimeoutMs} /> : measured?.after ? <Measured m={measured} /> : (
         <p className="rounded-md border border-dashed border-ink-700 px-3 py-5 text-center text-[13px] text-ink-500">
-          No failures yet. Press <b className="text-ember-300">Kill</b> on a busy worker and the recovery is timed here.
+          No failures in the last 10 minutes. Press <b className="text-ember-300">Kill</b> on a busy worker and the recovery is timed here.
         </p>
       )}
     </Card>
+  );
+}
+
+/** No recent failure: lead with the measured number rather than a stale record. */
+function Measured({ m }: { m: NonNullable<Benchmarks['recovery']> }) {
+  const after = m.after!;
+  return (
+    <div>
+      <div className="flex items-baseline gap-2">
+        <span className="text-[30px] font-semibold leading-none">{fmtMs(after.p50Ms)}</span>
+        <span className="text-[13px] text-ink-300">
+          p50 kill → task re-claimed, measured over {after.samples} kills (p95 {fmtMs(after.p95Ms)})
+          {m.before && <span className="text-ink-500"> · was {fmtMs(m.before.p50Ms)}</span>}
+        </span>
+      </div>
+      <p className="mt-2.5 rounded-md border border-dashed border-ink-700 px-3 py-2.5 text-[12.5px] text-ink-500">
+        No failures in the last 10 minutes. Press <b className="text-ember-300">Kill</b> on a busy worker to time one live.
+      </p>
+    </div>
   );
 }
 
