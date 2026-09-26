@@ -20,15 +20,24 @@ import { percentile } from "./telemetry.js";
 //   - fastest idle worker first (per-worker p50 service time: the pool is heterogeneous);
 //   - workers on probation (p50 > SPECULATE_PROBATION_MULTIPLIER × stage p50) get no copies.
 //
-// Service times are kept here, in memory (like the rest of the telemetry): completions of the
-// last 10 minutes, the last 200 per stage and the last 20 per worker. "Service time" is the
-// coordinator's view, claimed → complete handled, the same thing a task's age is measured in.
+// Service times are kept here, in memory (like the rest of the telemetry, replicated over the
+// cluster bus): completions of the last SPECULATE_WINDOW_MS (60 s), at most the last 200 per stage
+// and the last 20 per worker. "Service time" is the coordinator's view, claimed → complete handled,
+// the same thing a task's age is measured in. The window is short on purpose (it was 10 min): a
+// job of 5 ms tasks followed by one of 1 s tasks must not leave the 5 ms baseline behind, which
+// put every worker of the second job on probation and so switched speculation off for it.
 
 const STAGES: Stage[] = ["detect", "classify"];
-const HORIZON_MS = 10 * 60_000;
+const horizonMs = () => config.speculateWindowMs;
 const STAGE_SAMPLES = 200;
 const WORKER_SAMPLES = 20;
 const WORKER_MIN_SAMPLES = 3;
+/**
+ * Probation needs more evidence than ranking does: a replica that just started (or just took over)
+ * has only a handful of samples, and a few slow tasks out of a few samples looked like a straggler.
+ */
+const PROBATION_MIN_WORKER_SAMPLES = 5;
+const PROBATION_MIN_STAGE_SAMPLES = 20;
 /** A worker that didn't pick up its offer isn't offered another for this long. */
 const OFFER_COOLDOWN_MS = 30_000;
 
@@ -37,8 +46,9 @@ interface Sample {
   ms: number;
 }
 
-function p50(samples: Sample[], at: number) {
-  const recent = samples.filter((s) => s.at >= at - HORIZON_MS).map((s) => s.ms).sort((a, b) => a - b);
+function p50(samples: Sample[], at: number, since = -Infinity) {
+  const from = Math.max(at - horizonMs(), since);
+  const recent = samples.filter((s) => s.at >= from).map((s) => s.ms).sort((a, b) => a - b);
   return { p50: Math.round(percentile(recent, 50)), samples: recent.length };
 }
 
@@ -58,19 +68,22 @@ class ServiceTimes {
     if (w.samples.length > WORKER_SAMPLES) w.samples.splice(0, w.samples.length - WORKER_SAMPLES);
   }
 
-  stage(stage: Stage, at = Date.now()) {
-    return p50(this.stages[stage], at);
+  /** The stage's p50, optionally only over completions since `since` (ms epoch). */
+  stage(stage: Stage, at = Date.now(), since = -Infinity) {
+    return p50(this.stages[stage], at, since);
   }
 
   worker(workerId: string, at = Date.now()) {
     const w = this.workers.get(workerId);
-    return w ? { stage: w.stage, ...p50(w.samples, at) } : null;
+    if (!w) return null;
+    const recent = w.samples.filter((s) => s.at >= at - horizonMs());
+    return { stage: w.stage, ...p50(w.samples, at), since: recent.length ? recent[0].at : at };
   }
 
   /** Workers with a completion in the horizon (older entries are forgotten: workers come and go). */
   workerIds(at = Date.now()) {
     for (const [id, w] of this.workers) {
-      if (w.samples[w.samples.length - 1].at < at - HORIZON_MS) this.workers.delete(id);
+      if (w.samples[w.samples.length - 1].at < at - horizonMs()) this.workers.delete(id);
     }
     return [...this.workers.keys()];
   }
@@ -106,13 +119,19 @@ export interface Probation {
  * Workers whose recent p50 service time is more than SPECULATE_PROBATION_MULTIPLIER × their stage's
  * p50. They keep their normal work (probation isn't a punishment, it's a routing hint) but never
  * receive speculative copies: a copy on a slow worker would just be a second straggler.
+ *
+ * The stage p50 a worker is compared with covers the same stretch of time as the worker's own
+ * samples (since its oldest one in the window), so a change of workload (a new job with longer
+ * tasks) moves both sides together. At least PROBATION_MIN_WORKER_SAMPLES of the worker's and
+ * PROBATION_MIN_STAGE_SAMPLES of the stage's completions are needed.
  */
 export function probation(at = Date.now()): Probation[] {
   const out: Probation[] = [];
   for (const id of serviceTimes.workerIds(at)) {
     const w = serviceTimes.worker(id, at)!;
-    const st = serviceTimes.stage(w.stage, at);
-    if (w.samples < WORKER_MIN_SAMPLES || st.samples < config.speculateMinSamples || st.p50 <= 0) continue;
+    const st = serviceTimes.stage(w.stage, at, w.since);
+    if (w.samples < PROBATION_MIN_WORKER_SAMPLES) continue;
+    if (st.samples < Math.max(config.speculateMinSamples, PROBATION_MIN_STAGE_SAMPLES) || st.p50 <= 0) continue;
     if (w.p50 > config.speculateProbationMultiplier * st.p50) {
       out.push({ workerId: id, stage: w.stage, p50ServiceMs: w.p50, stageP50ServiceMs: st.p50 });
     }

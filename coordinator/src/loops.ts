@@ -1,6 +1,6 @@
 import { config } from "./config.js";
 import { query } from "./db.js";
-import { dispatchOnce, loadThrottle, rebuildQueues, repairLostQueued, syncSharedState } from "./dispatcher.js";
+import { dispatchOnce, loadThrottle, rebuildQueues, repairLostQueued, resetOrphanSightings, syncSharedState } from "./dispatcher.js";
 import { checkInvariants } from "./invariants.js";
 import { reapOnce, reaperStalls } from "./reaper.js";
 import { speculateOnce } from "./speculation.js";
@@ -47,6 +47,7 @@ export function startReplicaLoops(isLeader: () => boolean) {
 
 export function startLeaderLoops(opts: { self: string }) {
   reaperStalls.reset();
+  resetOrphanSightings(); // sightings from an earlier term of this process may be stale
   const stops = [
     every("dispatcher", config.dispatchIntervalMs, dispatchOnce),
     every("reaper", config.reapIntervalMs, async () => {
@@ -56,7 +57,7 @@ export function startLeaderLoops(opts: { self: string }) {
     }),
     // Per-worker service-time history lives in this process: a new leader starts with none.
     every("speculation", config.speculateIntervalMs, speculateOnce),
-    every("queued-audit", 5000, () => repairLostQueued()),
+    every("queued-audit", config.queuedAuditMs, () => repairLostQueued()),
     every("replicas", config.leaderRenewMs, async () => {
       const lost = await forgetLostReplicas(opts.self);
       if (lost.length > 0) await rebuildQueues(`replica lost: ${lost.join(", ")}`);

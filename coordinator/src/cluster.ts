@@ -257,6 +257,14 @@ export class ClusterBus implements HubRelay {
       args = [{ ...r, killedAt: r.killedAt ? new Date(r.killedAt) : null, detectedAt: new Date(r.detectedAt), requeuedAt: new Date(r.requeuedAt) }];
     }
     const fn = this.originals[method as Replicated];
-    if (fn) fn.apply(telemetry, args);
+    const out = fn ? fn.apply(telemetry, args) : undefined;
+    if (method === "recordRecovery" && Array.isArray(out) && out.length > 0) {
+      // This replica had already handled re-claims of that worker's tasks before the record reached
+      // it; tell the others (the replica that opened the record never heard of those claims).
+      for (const c of out as Array<{ taskId: string; workerId: string; at: number }>) {
+        this.outbox.telemetry.push(["recordClaimed", [[c.taskId], c.workerId, c.at]]);
+      }
+      this.schedule();
+    }
   }
 }

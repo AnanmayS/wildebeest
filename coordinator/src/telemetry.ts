@@ -121,6 +121,9 @@ interface OpenRecovery {
 }
 
 const MAX_RECOVERY_RECORDS = 20;
+/** How long, and how many, recent claims are remembered for recovery records that open late. */
+const RECENT_CLAIMS_MS = 30_000;
+const RECENT_CLAIMS_MAX = 100_000;
 
 // ---------------------------------------------------------------------------------------------
 // The singleton
@@ -149,6 +152,13 @@ class Telemetry {
 
   private recoveries: OpenRecovery[] = [];
   private recoveryByTask = new Map<string, OpenRecovery>();
+  /**
+   * Recent claims (task → when, by whom), oldest first. A recovery record can open after its task
+   * was already claimed again: the requeue's push raced the record (a worker claimed within a
+   * millisecond), or the record came from another replica over the bus after this replica handled
+   * the claim. Those claims still count toward closing it.
+   */
+  private recentClaims = new Map<string, { at: number; workerId: string }>();
 
   // ---- recording ---------------------------------------------------------------------------
 
@@ -232,10 +242,19 @@ class Telemetry {
     metrics.recovery(r.via);
     for (const id of r.taskIds) this.recoveryByTask.set(id, open);
     if (open.outstanding.size === 0) this.close(open, r.requeuedAt.getTime());
+    // Claims that got there before the record did. Only a task's latest claim is remembered: if
+    // that isn't the dead worker's own, it is the re-claim (no clock comparison needed; the
+    // coordinator's and Postgres's clocks may differ by a few ms).
+    const early = r.taskIds
+      .map((taskId) => ({ taskId, ...this.recentClaims.get(taskId)! }))
+      .filter((c) => c.workerId !== undefined && c.workerId !== r.workerId)
+      .sort((a, b) => a.at - b.at);
+    for (const c of early) this.claimRecovered(c.taskId, c.workerId, c.at);
     while (this.recoveries.length > MAX_RECOVERY_RECORDS) {
       const dropped = this.recoveries.shift()!;
       for (const id of dropped.outstanding) this.recoveryByTask.delete(id);
     }
+    return early;
   }
 
   /** Whether a claim of this task would close (part of) an open recovery record. */
@@ -245,14 +264,24 @@ class Telemetry {
 
   /** Called with every successful claim: closes recoveries whose last task was re-claimed. */
   recordClaimed(taskIds: string[], workerId: string, at = now()) {
-    if (this.recoveryByTask.size === 0) return;
     for (const id of taskIds) {
-      const open = this.recoveryByTask.get(id);
-      if (!open) continue;
-      this.recoveryByTask.delete(id);
-      open.outstanding.delete(id);
-      if (open.outstanding.size === 0) this.close(open, at, workerId);
+      this.recentClaims.delete(id); // re-insert: the map stays in claim order
+      this.recentClaims.set(id, { at, workerId });
     }
+    for (const [id, c] of this.recentClaims) {
+      if (this.recentClaims.size <= RECENT_CLAIMS_MAX && c.at >= at - RECENT_CLAIMS_MS) break;
+      this.recentClaims.delete(id);
+    }
+    if (this.recoveryByTask.size === 0) return;
+    for (const id of taskIds) this.claimRecovered(id, workerId, at);
+  }
+
+  private claimRecovered(taskId: string, workerId: string, at: number) {
+    const open = this.recoveryByTask.get(taskId);
+    if (!open) return;
+    this.recoveryByTask.delete(taskId);
+    open.outstanding.delete(taskId);
+    if (open.outstanding.size === 0) this.close(open, at, workerId);
   }
 
   private close(open: OpenRecovery, at: number, reclaimedBy: string | null = null) {
@@ -329,6 +358,7 @@ class Telemetry {
     this.cacheWindow = [];
     this.recoveries = [];
     this.recoveryByTask.clear();
+    this.recentClaims.clear();
   }
 }
 

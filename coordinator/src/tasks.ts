@@ -519,7 +519,8 @@ function timingSample(stage: Stage, row: Timeline, worker: WorkerTimings | null,
 
 interface CompleteRow extends Timeline {
   task_id: string | null;
-  status: ItemStatus | "job_done";
+  /** `duplicate`: a retry of this attempt's already committed completion (answered as ok, 010). */
+  status: ItemStatus | "job_done" | "duplicate";
   stage: Stage | null;
   job_id: string | null;
   finalised: boolean;
@@ -605,6 +606,13 @@ export async function completeTasks(
       results.set(taskId, { status: "invalid", error: "result.detections must be an array" });
       continue;
     }
+    if (r.status === "duplicate") {
+      // The first send committed; its answer was lost (replica died, connection reset). Same answer
+      // again, without counting the completion a second time.
+      results.set(taskId, { status: "ok" });
+      stage ??= r.stage;
+      continue;
+    }
     results.set(taskId, { status: r.status });
     if (r.status === "stale") {
       telemetry.recordStale(taskId, workerId, epochById.get(taskId)!, r.event_detail?.currentEpoch);
@@ -631,7 +639,7 @@ export async function completeTasks(
   let leases: Lease[] = [];
   // A single complete that wasn't accepted answers 409, which carries no leases: claiming for it
   // would strand them (LEASED to a worker that never hears of them) until their lease expired.
-  if (next > 0 && !(opts.single && rows.every((r) => r.status !== "ok"))) {
+  if (next > 0 && !(opts.single && rows.every((r) => r.status !== "ok" && r.status !== "duplicate"))) {
     stage ??= await workerStage(workerId);
     if (stage) leases = await claimNext(workerId, stage, next);
   }
@@ -899,6 +907,17 @@ export interface Requeued {
 }
 
 /**
+ * A lease its worker never knew about: the worker is ALIVE and kept heartbeating for at least one
+ * interval after the claim, yet no heartbeat ever listed the task (the lease was never renewed:
+ * it still expires exactly LEASE_MS after the claim). That is a claim whose response was lost:
+ * the replica that committed it died, or the connection was reset on the way back. Losing it is
+ * not the task's fault, so it costs a release, not an attempt. ($4 lease ms, $5 heartbeat ms.)
+ */
+const UNACKED = `w.status = 'ALIVE'
+                  and t.lease_expires_at <= t.started_at + ($4::int * interval '1 millisecond')
+                  and w.last_heartbeat_at > t.started_at + ($5::int * interval '1 millisecond')`;
+
+/**
  * Reaper / death-watch transition: LEASED tasks whose lease expired, or whose worker is no longer
  * ALIVE, go back to PENDING or, once attempts run out, to FAILED. One statement; rows a concurrent
  * complete/claim is holding are skipped (SKIP LOCKED) and picked up next pass.
@@ -910,7 +929,9 @@ export interface Requeued {
  *   fault: it costs a release, not an attempt. A kill ends the incarnation, so every lease that
  *   incarnation held is ours (killed_at >= registered_at; a task can be claimed in the few hundred
  *   ms between our stamp and the container actually dying). A pause covers tasks started before
- *   it ended (started_at <= paused_until, for a pause of this incarnation).
+ *   it ended (started_at <= paused_until, for a pause of this incarnation). So is a lease the
+ *   worker never acknowledged (UNACKED: a claim whose response was lost); its event says
+ *   `unacknowledged: true`.
  */
 export async function requeueLostLeases(
   opts: { workerIds?: string[]; graceMs?: number } = {},
@@ -932,6 +953,7 @@ export async function requeueLostLeases(
         old_worker: string | null;
         worker_gone: boolean;
         induced: boolean;
+        unacked: boolean;
         lease_epoch: number;
         started_at: Date | null;
         traceparent: string | null;
@@ -940,7 +962,9 @@ export async function requeueLostLeases(
       `with lost as (
          select t.id, t.worker_id as old_worker, (w.status is distinct from 'ALIVE') as worker_gone,
                 coalesce(w.killed_at >= w.registered_at, false)
-                  or coalesce(w.paused_at >= w.registered_at and t.started_at <= w.paused_until, false) as induced
+                  or coalesce(w.paused_at >= w.registered_at and t.started_at <= w.paused_until, false)
+                  or coalesce(${UNACKED}, false) as induced,
+                coalesce(${UNACKED}, false) as unacked
            from tasks t left join workers w on w.id = t.worker_id
           where t.state = 'LEASED'
             and ($3::text[] is null or t.worker_id = any($3::text[]))
@@ -965,9 +989,9 @@ export async function requeueLostLeases(
               queued = false, worker_id = null, lease_expires_at = null
          from decided d
         where t.id = d.id and t.state = 'LEASED'
-        returning t.id, t.stage, t.state, t.attempts, t.image_id, d.old_worker, d.worker_gone, d.induced,
+        returning t.id, t.stage, t.state, t.attempts, t.image_id, d.old_worker, d.worker_gone, d.induced, d.unacked,
                   t.lease_epoch, t.started_at, t.traceparent`,
-      [config.maxAttempts, graceMs, opts.workerIds ?? null],
+      [config.maxAttempts, graceMs, opts.workerIds ?? null, config.leaseMs, config.heartbeatMs],
     );
     if (rows.length === 0 && promoted.length === 0) {
       return { requeued: 0, failed: 0, tasks: [] as Requeued[], events: [] as EventRow[] };
@@ -986,7 +1010,7 @@ export async function requeueLostLeases(
           type: t.worker_gone ? "reassigned" : "lease_expired",
           taskId: t.id,
           workerId: t.old_worker,
-          detail: { attempts: t.attempts, stage: t.stage, charged: !t.induced },
+          detail: { attempts: t.attempts, stage: t.stage, charged: !t.induced, ...(t.unacked ? { unacknowledged: true } : {}) },
         });
       }
       if (t.worker_gone && t.old_worker) perWorker.set(t.old_worker, (perWorker.get(t.old_worker) ?? 0) + 1);

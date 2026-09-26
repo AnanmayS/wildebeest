@@ -11,6 +11,10 @@ Lifecycle
      MULTI/EXEC (reliable queue: an ID is never only in our memory), then POST
      /tasks/claim-confirm for leases with fencing tokens (leaseEpoch). Postgres mode long-polls
      POST /tasks/claim instead. k ≈ round trip ÷ service time, measured online (ClaimSizer).
+     The same MULTI first reads our processing list: claim-confirm empties it, so anything
+     still there was moved by a claim whose reply we never saw (a connection reset mid-command,
+     which redis-py then silently retries, or a claim-confirm that never got through). Those IDs
+     are confirmed along with the new ones instead of sitting there forever.
   4. Process the held leases in order. With prefetch, the next image downloads while the
      current one runs. Results are buffered and reported in one request (complete, or
      complete-batch for several) that also asks for the next leases (`next`), so a busy
@@ -292,6 +296,7 @@ class Worker:
         # Running tasks the coordinator told us to drop (heartbeat `cancel`): their result is discarded.
         self.cancelled: set[str] = set()
         self.tasks_cancelled = 0
+        self.orphans_recovered = 0  # IDs found in our processing list that a lost claim reply left there
         self.tasks_done = 0
         self.total_latency_ms = 0.0
         tracing.setup(stage)  # no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set
@@ -485,21 +490,34 @@ class Worker:
         """
         k = k or self.window()
         src, dst = f"queue:{self.stage}", f"processing:{self.worker_id}"
-        ids = self._move(src, dst, k, offers=f"spec:{self.worker_id}")
-        if not ids:
+        leftover, ids = self._move(src, dst, k, offers=f"spec:{self.worker_id}", leftover=True)
+        if leftover:
+            self.orphans_recovered += len(leftover)
+            log.warning("found %d task ID(s) in %s that an earlier claim moved without our knowing "
+                        "(lost reply); confirming them now", len(leftover), dst)
+            # Leftovers first (they were at the head of the queue); an ID can't be in both.
+            ids = leftover + [i for i in ids if i not in set(leftover)]
+        elif not ids:
             first = self.redis.blmove(src, dst, self.idle_wait_s, "LEFT", "RIGHT")
             if first is None:
                 return []
-            ids = [first] + (self._move(src, dst, k - 1) if k > 1 else [])
+            ids = [first] + (self._move(src, dst, k - 1)[1] if k > 1 else [])
         return [i.decode() if isinstance(i, bytes) else i for i in ids]
 
-    def _move(self, src: str, dst: str, k: int, offers: str | None = None) -> list:
+    def _move(self, src: str, dst: str, k: int, offers: str | None = None,
+              leftover: bool = False) -> tuple[list, list]:
+        """One MULTI: optionally read what is already in our processing list (before anything
+        moves), take an offered copy, then up to k IDs. Returns (already there, newly moved)."""
         pipe = self.redis.pipeline(transaction=True)
+        if leftover:
+            pipe.lrange(dst, 0, -1)
         if offers:
             pipe.lmove(offers, dst, "LEFT", "RIGHT")
         for _ in range(k):
             pipe.lmove(src, dst, "LEFT", "RIGHT")
-        return [i for i in pipe.execute() if i is not None]
+        replies = pipe.execute()
+        before = list(replies[0]) if leftover else []
+        return before, [i for i in replies[1 if leftover else 0:] if i is not None]
 
     def confirm(self, task_ids: list[str]) -> list[dict]:
         resp = self._post("/tasks/claim-confirm", {"workerId": self.worker_id, "taskIds": task_ids})

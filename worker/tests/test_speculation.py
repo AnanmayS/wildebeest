@@ -36,6 +36,7 @@ def spec_worker(handler=None, **kw):
 
     coord = SpecCoordinator(**kw)
     r = fakeredis.FakeRedis()
+    coord.redis = r
     worker = Worker("detect", handler or (lambda lease: {"modelVersion": "v", "detections": []}), r,
                     "http://coord", http=coord, hostname="abc123", runtime="container")
     worker.register()

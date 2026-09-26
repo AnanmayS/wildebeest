@@ -642,3 +642,50 @@ the additions are optional fields that old workers ignore and old coordinators n
   `coordinator_id` label. Counters and histograms count only what that replica handled itself (records
   replicated over the cluster bus are not counted again), so **sum** them across replicas. Gauges come from
   the cluster-wide `system` snapshot / Postgres and are the same on every replica, so take the **max**.
+
+## Final refinements (fix-ups, 2026-09-25)
+
+Recorded by the fix-up pass (docs/decisions/f-fixups.md, migration `010_fixups.sql`). Every HTTP, WebSocket and
+dashboard shape above is unchanged.
+
+**Workers read their own processing list.** The hybrid claim `MULTI` now starts with
+`LRANGE processing:{workerId} 0 -1` (before the offer `LMOVE` and the k `LMOVE`s), so workers do BLMOVE, LMOVE and
+this one LRANGE of their own list. claim-confirm empties the list, so anything still in it was moved by an earlier
+claim whose reply the worker never saw: a connection reset while BLMOVE / the MULTI was in flight (redis-py then
+raises, or by default silently re-sends the command, which moves more IDs), or a claim-confirm that never got
+through. The worker claim-confirms those IDs together with the newly moved ones (leftovers first). No extra round
+trip.
+
+**The leader takes back IDs orphaned in a live worker's processing list.** The queued-row audit
+(`repairLostQueued`, every `QUEUED_AUDIT_MS`, default 5000) also looks at IDs whose task is still `PENDING` +
+`queued`, pushed more than 5 s ago, that sit only in an **ALIVE** worker's `processing:{id}` (not in a ready queue).
+One seen there by an earlier pass, and still there `ORPHAN_GRACE_MS` later (default 0 = 3 × `HEARTBEAT_MS`), is
+taken back: a fenced `UPDATE tasks SET pushed_at = now()` (only while still PENDING + queued), then `LREM` from that
+list and, only if the LREM removed it, `LPUSH` to the head of its queue. Worst case, an orphan the worker itself
+never picks up again is re-dispatched within grace + 2 audit intervals (≈ 16 s with the defaults). A claim-confirm
+still in flight after the grace is unaffected (it leases any PENDING ID; the extra queue entry is skipped by
+whoever pulls it). Lists of non-ALIVE workers stay the reaper's.
+
+**Idempotent completion retry.** `POST /tasks/:id/complete` and `complete-batch` items for a task that is already
+`SUCCEEDED` **with the same `leaseEpoch`, credited to the sending worker** (i.e. the same attempt: its first send
+committed but the answer was lost, e.g. a replica died after COMMIT) are answered as accepted: `200 { "ok": true }`
+(with `leases` when `next` was asked for), item status `"ok"`. Nothing is written: no second result, no
+`succeeded` or `stale_rejected` event, not counted in `system.fencing` or `system.timings`. Any other late report
+is unchanged: `ALREADY_DONE` for the attempt that lost a speculation race, `STALE_LEASE` for everything else
+(an older epoch, another worker's epoch, a task that went back to PENDING). fail/release retries are unchanged.
+
+**Dashboard-facing fixes (shapes as already specified).**
+- `GET /benchmarks` is now served (it was specified in "v2 additions" but returned 404): `summary.json` from
+  `BENCHMARKS_DIR` (default `/benchmarks`, the Compose mount on both replicas); 404 `{ "error": "NO_BENCHMARKS" }`
+  when absent.
+- `GET /config` gains `"grafanaUrl": string | null` from the coordinator env `GRAFANA_PUBLIC_URL` (null when unset).
+- `system.recovery[]` records now close reliably: the record opens before the requeued IDs are pushed, and a re-claim
+  that reached a replica before the record did (another replica, or a drained ID) is still counted.
+- `probation` / `p50ServiceMs` / speculation thresholds use completions of the last `SPECULATE_WINDOW_MS` (60 s, was
+  10 min); probation needs ≥ 5 samples of the worker and ≥ 20 of the stage, the stage p50 taken over the same span as
+  the worker's samples.
+- `lease_expired.detail` may carry `unacknowledged: true` (with `charged: false`): the lease expired on an ALIVE worker
+  that kept heartbeating after the claim but never listed the task, i.e. the claim's response was lost (a replica died,
+  a connection reset). It costs a release, not an attempt.
+- `system.invariants`: each check runs with a statement timeout (`INVARIANT_TIMEOUT_MS`, 2 s); a check that times out
+  keeps its previous value.

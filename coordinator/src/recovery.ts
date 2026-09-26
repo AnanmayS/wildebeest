@@ -129,13 +129,17 @@ async function handleDeaths(
   for (const id of ids) pipe.del(keys.alive(id));
   await pipe.exec();
 
-  // Leases first (one statement for all of them), then IDs BLMOVEd but never claim-confirmed.
+  // Leases first (one statement for all of them), then IDs BLMOVEd but never claim-confirmed
+  // (the drain puts those back on the queue itself).
   const leases = await requeueLostLeases({ workerIds: ids });
   const drainedByWorker = new Map<string, string[]>();
   for (const id of ids) drainedByWorker.set(id, await drainProcessingList(id));
-  const pushed = await pushNow(leases.tasks.map((t) => t.id));
   const requeuedAt = new Date();
 
+  // The recovery records open before the requeued leases are pushed: a worker can claim a pushed
+  // ID within a millisecond, and a claim nobody was waiting for would leave the record open
+  // forever. (Drained IDs, pushed by the drain, and claims handled on another replica are matched
+  // by the telemetry's recent-claims memory instead.)
   for (const f of facts) {
     const taskIds = [
       ...leases.tasks.filter((t) => t.oldWorker === f.w.id).map((t) => t.id),
@@ -155,6 +159,7 @@ async function handleDeaths(
         `${taskIds.length} task(s) requeued to the queue head`,
     );
   }
+  const pushed = await pushNow(leases.tasks.map((t) => t.id));
   hub.workersChanged();
   const drained = [...drainedByWorker.values()].reduce((n, l) => n + l.length, 0);
   return { dead: ids, requeued: leases.requeued, failed: leases.failed, drained, pushed };

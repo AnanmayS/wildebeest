@@ -273,13 +273,15 @@ describe("single-statement completes", () => {
     expect(await completeTask(lb.taskId, b, lb.leaseEpoch, detectResult([{ label: "human", conf: 0.9 }]))).toEqual({
       status: "ok",
     });
-    // A duplicate of the accepted complete (a retried request) is fenced too: already SUCCEEDED.
-    expect(await completeTask(lb.taskId, b, lb.leaseEpoch, detectResult([]))).toEqual({ status: "stale" });
+    // A duplicate of the accepted complete (a retried request whose answer was lost) is answered
+    // ok again, idempotently (010): nothing written, no stale_rejected. The old epoch stays fenced.
+    expect(await completeTask(lb.taskId, b, lb.leaseEpoch, detectResult([]))).toEqual({ status: "ok" });
+    expect(await completeTask(la.taskId, a, la.leaseEpoch, detectResult([]))).toEqual({ status: "stale" });
 
     const stale = await events("stale_rejected", la.taskId);
     expect(stale.map((e) => [e.worker_id, e.detail.leaseEpoch, e.detail.currentEpoch])).toEqual([
       [a, 1, 2],
-      [b, 2, 2],
+      [a, 1, 2],
     ]);
     expect(await events("succeeded", la.taskId)).toHaveLength(1);
     expect(telemetry.fencing.staleRejected).toBe(2);

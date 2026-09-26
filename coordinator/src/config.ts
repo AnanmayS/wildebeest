@@ -56,6 +56,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
 
     dispatchIntervalMs: num(env, "DISPATCH_INTERVAL_MS", 200),
     reapIntervalMs: num(env, "REAP_INTERVAL_MS", 1000),
+    // Leader's queued-row audit (dispatcher.repairLostQueued): how often it runs, and how long an ID
+    // may sit unconfirmed in a live worker's processing list before it is taken back (0 = 3 heartbeats).
+    queuedAuditMs: num(env, "QUEUED_AUDIT_MS", 5000),
+    orphanGraceMs: num(env, "ORPHAN_GRACE_MS", 0),
     dockerSocket: str(env, "DOCKER_SOCKET", "/var/run/docker.sock"),
     // Docker `die`/`oom` events are the fast failure detector. "auto" = on when the coordinator can
     // see the Docker socket and find its own Compose project; "off" = heartbeats only.
@@ -82,7 +86,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     modelBackend: str(env, "MODEL_BACKEND", "speciesnet"),
     systemIntervalMs: num(env, "SYSTEM_INTERVAL_MS", 500),
     invariantIntervalMs: num(env, "INVARIANT_INTERVAL_MS", 5000),
+    /** Statement timeout for each live invariant query: a check must never be a long transaction. */
+    invariantTimeoutMs: num(env, "INVARIANT_TIMEOUT_MS", 2000),
     maxSyntheticTasks: num(env, "MAX_SYNTHETIC_TASKS", 1_000_000),
+    /** Where GET /benchmarks reads summary.json (Compose mounts ./benchmarks here, read-only). */
+    benchmarksDir: str(env, "BENCHMARKS_DIR", "/benchmarks"),
+    /** Public Grafana URL for the dashboard's "Open traces" link (GET /config `grafanaUrl`); empty = none. */
+    grafanaPublicUrl: env.GRAFANA_PUBLIC_URL ?? "",
 
     // Straggler speculation (docs/decisions/p3-speculation.md). When a stage's ready queue is
     // empty and a worker is idle, a task running longer than max(SPECULATE_MIN_MS,
@@ -97,6 +107,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     speculateIntervalMs: num(env, "SPECULATE_INTERVAL_MS", 250),
     /** An offer the target worker hasn't claimed by then is dropped (and may go to another worker). */
     speculateOfferTtlMs: num(env, "SPECULATE_OFFER_TTL_MS", 3000),
+    /** Service-time samples older than this are forgotten (stage and worker p50s, probation). */
+    speculateWindowMs: num(env, "SPECULATE_WINDOW_MS", 60_000),
 
     // High availability (docs/decisions/h-ha.md). Every replica serves the API; one leader, elected
     // through a lease row in Postgres, runs the singleton loops. COORDINATOR_ID names this replica

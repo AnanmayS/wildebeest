@@ -35,6 +35,7 @@ class FakeCoordinator:
         self.heartbeat_status = 200
         self.register_failures = 0
         self.registrations = 0
+        self.redis = None  # set by the helpers: claim-confirm LREMs the IDs, like the coordinator
 
     def paths(self, suffix: str) -> list[dict]:
         return [body for path, body in self.calls if path.endswith(suffix)]
@@ -50,6 +51,9 @@ class FakeCoordinator:
             return Resp(200, {"workerId": f"detect-w{self.registrations}",
                               "config": {"heartbeatMs": 2000, "claimBatchSize": 1}})
         if path == "/tasks/claim-confirm":
+            if self.redis is not None:
+                for task_id in json["taskIds"]:
+                    self.redis.lrem(f"processing:{json['workerId']}", 0, task_id)
             leases = []
             for task_id in json["taskIds"]:
                 self.epochs[task_id] = self.epochs.get(task_id, 0) + 1
@@ -67,6 +71,7 @@ class FakeCoordinator:
 def make_worker(handler=None, batch=1):
     coord = FakeCoordinator()
     r = fakeredis.FakeRedis()
+    coord.redis = r
     worker = Worker(
         stage="detect",
         handler=handler or (lambda lease: {"modelVersion": "fake-detector-v1", "detections": []}),
@@ -105,9 +110,9 @@ def test_claim_moves_ids_to_processing_list_then_completes():
 
     assert worker.run_once() == 1
 
-    # BLMOVE took exactly one ID into this worker's processing list (the coordinator LREMs it).
+    # BLMOVE took exactly one ID into this worker's processing list; claim-confirm LREMed it.
     assert r.lrange("queue:detect", 0, -1) == [b"t2"]
-    assert r.lrange("processing:detect-w1", 0, -1) == [b"t1"]
+    assert r.lrange("processing:detect-w1", 0, -1) == []
     assert coord.paths("/tasks/claim-confirm") == [{"workerId": "detect-w1", "taskIds": ["t1"]}]
     [complete] = coord.paths("/tasks/t1/complete")
     assert complete["workerId"] == "detect-w1"

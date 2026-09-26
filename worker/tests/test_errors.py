@@ -154,6 +154,7 @@ def test_storage_raises_typed_errors_and_ping_probes_the_bucket():
 def make_worker(handler, batch=1, probe=None, io_timer=None):
     coord = FakeCoordinator()
     r = fakeredis.FakeRedis()
+    coord.redis = r
     worker = Worker("detect", handler, r, "http://coord", http=coord, hostname="abc123", startup_timeout_s=5,
                     runtime="container", io_timer=io_timer, probe=probe)
     worker.register()
@@ -318,6 +319,7 @@ class FlakyCoordinator(FakeCoordinator):
 def flaky_worker(failures: int, mode: str = "connect"):
     coord = FlakyCoordinator(failures, mode)
     r = fakeredis.FakeRedis()
+    coord.redis = r
     worker = Worker("detect", lambda l: {"modelVersion": "v", "detections": []}, r, "http://coord", http=coord,
                     hostname="h", runtime="container")
     worker.register()

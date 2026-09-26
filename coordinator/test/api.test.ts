@@ -234,6 +234,7 @@ describe("dashboard endpoints", () => {
       workerTimeoutMs: config.workerTimeoutMs,
       leaseMs: config.leaseMs,
       humanReviewSecondsPerImage: config.humanReviewSecondsPerImage,
+      grafanaUrl: null, // GRAFANA_PUBLIC_URL unset
     });
     expect((await api("POST", "/chaos", { enabled: false, killEverySec: 7 })).body).toEqual({
       enabled: false,

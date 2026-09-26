@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import { getChaos, setChaos } from "./chaos.js";
@@ -68,7 +70,22 @@ export function createApp() {
       workerTimeoutMs: config.workerTimeoutMs,
       leaseMs: config.leaseMs,
       humanReviewSecondsPerImage: config.humanReviewSecondsPerImage,
+      // Optional (GRAFANA_PUBLIC_URL): the dashboard shows "Open traces in Grafana" when set.
+      grafanaUrl: config.grafanaPublicUrl || null,
     });
+  });
+
+  // CONTRACTS.md "GET /benchmarks": the benchmark harness's summary.json, or 404 when absent.
+  app.get("/benchmarks", async (_req, res) => {
+    try {
+      const text = await fs.readFile(path.join(config.benchmarksDir, "summary.json"), "utf8");
+      res.type("application/json").send(JSON.stringify(JSON.parse(text)));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return res.status(404).json({ error: "NO_BENCHMARKS" });
+      console.error(`[api] GET /benchmarks: ${(err as Error).message}`);
+      res.status(500).json({ error: "BENCHMARKS_UNREADABLE" });
+    }
   });
 
   // ---- jobs (dashboard) ------------------------------------------------------------------

@@ -67,6 +67,7 @@ class HotCoordinator(FakeCoordinator):
 def hot_worker(handler=None, prefetch=None, **coord_kwargs):
     coord = HotCoordinator(**coord_kwargs)
     r = fakeredis.FakeRedis()
+    coord.redis = r
     worker = Worker("detect", handler or (lambda lease: {"modelVersion": "v", "detections": []}), r,
                     "http://coord", http=coord, hostname="abc123", runtime="container", prefetch=prefetch)
     worker.register()

@@ -52,6 +52,7 @@ export function resetDispatcherState() {
   eventPushesSuspended = false;
   for (const t of retryTimers) clearTimeout(t);
   retryTimers.clear();
+  orphanSightings.clear();
 }
 
 /** Test hook: drop every post-commit push, as a crash right after COMMIT would. */
@@ -387,42 +388,126 @@ export async function rebuildQueues(reason: string): Promise<number> {
 }
 
 /**
- * Leader, every few seconds (hybrid mode): rows Postgres counts as queued (PENDING, queued=true)
- * whose ID is in no Redis list any more are marked unqueued, so the repair sweep pushes them again.
- * That happens when an ID was popped (complete-and-claim-next's LPOP) and the lease statement, and
- * then the put-back, failed with their connection (a terminated backend) or died with their
- * replica. The rebuild after a lost replica covers the second case; this covers the first, which
- * otherwise waited for the next rebuild. Only rows pushed more than `minAgeMs` ago are considered,
- * and every list is read in one MULTI (an atomic snapshot); an ID that is between a pop and its
- * lease at that very moment is re-pushed as a duplicate, which claim-confirm makes harmless.
+ * IDs seen sitting in a live worker's processing list while their task is still PENDING: the
+ * audit's memory between passes (task id → where and when it was first seen there). Leader-local;
+ * a new leader starts empty and simply needs one more pass.
  */
-export async function repairLostQueued(minAgeMs = 5000): Promise<number> {
+const orphanSightings = new Map<string, { workerId: string; at: number }>();
+export const resetOrphanSightings = () => orphanSightings.clear();
+
+/** How long an unconfirmed ID may sit in a live worker's processing list (default 3 heartbeats). */
+export const orphanGraceMs = () => (config.orphanGraceMs > 0 ? config.orphanGraceMs : 3 * config.heartbeatMs);
+
+/**
+ * Leader, every QUEUED_AUDIT_MS (hybrid mode): reconcile the rows Postgres counts as queued
+ * (PENDING, queued=true, pushed more than `minAgeMs` ago) with what Redis actually holds, read in
+ * one MULTI (an atomic snapshot of the ready queues and every worker's processing and offer lists).
+ *
+ * 1. In no Redis list at all → marked unqueued, so the repair sweep pushes them again. That happens
+ *    when an ID was popped (complete-and-claim-next's LPOP) and the lease statement, and then the
+ *    put-back, failed with their connection (a terminated backend) or died with their replica.
+ *
+ * 2. Only in an ALIVE worker's processing list, and still there `graceMs` after an earlier pass saw
+ *    it there → an orphan: the worker's BLMOVE / MULTI of LMOVEs moved it, but the reply was lost
+ *    (connection reset mid-command), or its claim-confirm never got through, so the worker doesn't
+ *    know it has it. The reaper only drains lists of workers that are not ALIVE, and the sweep only
+ *    pushes queued=false rows, so nothing else would ever look at it: the job would never finish.
+ *    It is taken back: LREM from that list and LPUSH to the head of its queue. The fenced UPDATE
+ *    (pushed_at = now(), only if still PENDING and queued) goes first, so a deposed leader touches
+ *    nothing in Redis, and the push happens only if the LREM removed the ID, so an ID the worker
+ *    confirmed meanwhile (claim-confirm LREMs it) isn't pushed again. A claim that is genuinely in
+ *    flight for longer than the grace still works: claim-confirm leases any PENDING ID, and the extra
+ *    queue entry is skipped by whoever pulls it (only PENDING tasks can be leased).
+ *
+ * An ID caught between a pop and its lease at the snapshot is at worst queued twice (harmless).
+ * Returns how many rows were repaired (1 + 2).
+ */
+export async function repairLostQueued(minAgeMs = 5000, graceMs = orphanGraceMs(), now = Date.now()): Promise<number> {
   if (!hybrid()) return 0;
-  const { rows } = await query<{ id: string }>(
-    `select id from tasks where state = 'PENDING' and queued
+  const { rows } = await query<{ id: string; stage: Stage }>(
+    `select id, stage from tasks where state = 'PENDING' and queued
         and pushed_at < now() - ($1::int * interval '1 millisecond')
       limit 10000`,
     [minAgeMs],
   );
-  if (rows.length === 0) return 0;
-  const { rows: workers } = await query<{ id: string }>(
-    `select id from workers where status = 'ALIVE' or greatest(last_heartbeat_at, dead_at) > now() - interval '15 minutes'`,
+  if (rows.length === 0) {
+    orphanSightings.clear();
+    return 0;
+  }
+  const { rows: workers } = await query<{ id: string; alive: boolean }>(
+    `select id, status = 'ALIVE' as alive from workers
+      where status = 'ALIVE' or greatest(last_heartbeat_at, dead_at) > now() - interval '15 minutes'`,
   );
   const multi = getRedis().multi().lrange(keys.queue("detect"), 0, -1).lrange(keys.queue("classify"), 0, -1);
   for (const w of workers) multi.lrange(keys.processing(w.id), 0, -1).lrange(keys.spec(w.id), 0, -1);
+  const lists = (await multi.exec()) ?? [];
   const present = new Set<string>();
-  for (const [err, ids] of (await multi.exec()) ?? []) {
+  /** IDs held only by a live worker's processing list: id → that worker. */
+  const heldBy = new Map<string, string>();
+  const elsewhere = new Set<string>();
+  lists.forEach(([err, ids], i) => {
     if (err) throw err;
-    for (const id of ids as string[]) present.add(id);
-  }
+    // Order: the two queues, then (processing, spec) per worker.
+    const w = i >= 2 && i % 2 === 0 ? workers[(i - 2) / 2] : null;
+    for (const id of ids as string[]) {
+      present.add(id);
+      if (w?.alive) heldBy.set(id, w.id);
+      else elsewhere.add(id);
+    }
+  });
+
+  // 1. Lost: in no list.
+  let repaired = 0;
   const lost = rows.map((r) => r.id).filter((id) => !present.has(id));
-  if (lost.length === 0) return 0;
-  const { rowCount } = await query(
-    `update tasks set queued = false where id = any($1::uuid[]) and state = 'PENDING' and queued`,
-    [lost],
+  if (lost.length > 0) {
+    const { rowCount } = await query(
+      `update tasks set queued = false where id = any($1::uuid[]) and state = 'PENDING' and queued`,
+      [lost],
+    );
+    if (rowCount) console.warn(`[dispatcher] ${rowCount} queued task(s) were in no Redis list; re-dispatching them`);
+    repaired += rowCount ?? 0;
+  }
+
+  // 2. Orphans: unconfirmed in a live worker's processing list for at least the grace.
+  const due: Array<{ id: string; stage: Stage; workerId: string }> = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const workerId = heldBy.get(r.id);
+    if (!workerId || elsewhere.has(r.id)) continue; // not held, or also queued: a claim will find it
+    seen.add(r.id);
+    const first = orphanSightings.get(r.id);
+    if (first && first.workerId === workerId && now - first.at >= graceMs) due.push({ ...r, workerId });
+    else if (!first || first.workerId !== workerId) orphanSightings.set(r.id, { workerId, at: now });
+  }
+  for (const id of [...orphanSightings.keys()]) if (!seen.has(id)) orphanSightings.delete(id);
+  if (due.length > 0) repaired += await repushOrphans(due, graceMs);
+  return repaired;
+}
+
+async function repushOrphans(due: Array<{ id: string; stage: Stage; workerId: string }>, graceMs: number): Promise<number> {
+  for (const o of due) orphanSightings.delete(o.id);
+  // Fenced (leader-only transaction) and guarded: only rows still PENDING and queued.
+  const { rows } = await query<{ id: string; stage: Stage }>(
+    `update tasks set pushed_at = now() where id = any($1::uuid[]) and state = 'PENDING' and queued
+      returning id, stage`,
+    [due.map((o) => o.id)],
   );
-  if (rowCount) console.warn(`[dispatcher] ${rowCount} queued task(s) were in no Redis list; re-dispatching them`);
-  return rowCount ?? 0;
+  if (rows.length === 0) return 0;
+  const still = new Set(rows.map((r) => r.id));
+  const mine = due.filter((o) => still.has(o.id));
+  const pipe = getRedis().pipeline();
+  for (const o of mine) pipe.lrem(keys.processing(o.workerId), 0, o.id);
+  const removed = (await pipe.exec()) ?? [];
+  const take = mine.filter((_, i) => !removed[i]?.[0] && Number(removed[i]?.[1]) > 0);
+  if (take.length === 0) return 0;
+  // On a failed push pushRows un-marks the rows, so the repair sweep pushes them instead.
+  await pushRows(take, "head");
+  const byWorker = [...new Set(take.map((o) => o.workerId))].join(", ");
+  console.warn(
+    `[dispatcher] ${take.length} task ID(s) sat unconfirmed in the processing list of live worker(s) ${byWorker} ` +
+      `for over ${graceMs} ms (a lost BLMOVE/LMOVE reply or claim-confirm); re-pushed to the queue head`,
+  );
+  return take.length;
 }
 
 /**
